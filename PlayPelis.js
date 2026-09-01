@@ -62,6 +62,24 @@ function mkDetail(id, name, thumb, url, videoUrls, description) {
     return null;
 }
 
+// ========== PAGERS ==========
+class PlayPelisHomePager extends VideoPager {
+    constructor(results, hasMore, context) {
+        super(results, hasMore, context);
+    }
+    nextPage() {
+        return source.getHome(this.context.continuationToken);
+    }
+}
+
+class PlayPelisSearchPager extends VideoPager {
+    constructor(results, hasMore, context) {
+        super(results, hasMore, context);
+    }
+    nextPage() {
+        return source.search(this.context.query, this.context.type, this.context.order, this.context.filters, this.context.continuationToken);
+    }
+}
 // ========== ESPLAY SEARCH (usa showSearch como la APK) ==========
 function esplaySearch(query) {
     var items = [];
@@ -78,7 +96,7 @@ function esplaySearch(query) {
     return items;
 }
 
-function doSearch(query) {
+function doSearch(query, type, order, filters, continuationToken) {
     var results = [];
     var items = esplaySearch(query);
     for (var i = 0; i < items.length; i++) {
@@ -86,11 +104,11 @@ function doSearch(query) {
         var typeStr = item.type === "tvshow" ? "tvshow" : "movie";
         var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
         var ppUrl = "esplay|" + typeStr + "|" + String(item.id) + "|" + item.slug;
-        results.push(mkVideo(item.id || String(i), item.title || "Sin titulo", cover, ppUrl));
+        var yearMs = item.year ? new Date(String(item.year) + "-01-01").getTime() : _now;
+        results.push(mkVideo(item.id || String(i), item.title || "Sin titulo", cover, ppUrl, yearMs));
     }
-    return results;
+    return new PlayPelisSearchPager(results, false, { query: query, type: type, order: order, filters: filters, continuationToken: null });
 }
-
 // ========== ESPLAY VIDEO LINKS ==========
 function esplayGetVideoLinks(itemId) {
     var videoUrls = [];
@@ -122,35 +140,33 @@ function esplayGetVideoLinks(itemId) {
 }
 
 // ========== HOME ==========
-function doHome() {
-    var sections = [];
+function doHome(continuationToken) {
+    var allVideos = [];
     try {
         var resp = gqlPost("query { showList(type: \"movie\", list: \"recently_added\", page: 1, limit: 20) { items { id title slug coverPath year overview type } } }", {});
         if (resp && resp.data && resp.data.showList && resp.data.showList.items) {
             var items = resp.data.showList.items;
-            var vids = [];
             for (var i = 0; i < items.length; i++) {
                 var item = items[i];
                 var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
-                vids.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay|" + (item.type || "movie") + "|" + String(item.id) + "|" + item.slug));
+                var ym = item.year ? new Date(String(item.year) + "-01-01").getTime() : _now;
+                allVideos.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay|" + (item.type || "movie") + "|" + String(item.id) + "|" + item.slug, ym));
             }
-            sections.push(new PlatformContent({ name: "Recientes", items: vids, contentType: Type.Feed.Mixed }));
         }
     } catch (e) {}
     try {
         var resp2 = gqlPost("query { showList(type: \"movie\", list: \"premiere\", page: 1, limit: 20) { items { id title slug coverPath year overview type } } }", {});
         if (resp2 && resp2.data && resp2.data.showList && resp2.data.showList.items) {
             var items2 = resp2.data.showList.items;
-            var vids2 = [];
             for (var i = 0; i < items2.length; i++) {
                 var item = items2[i];
                 var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
-                vids2.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay|" + (item.type || "movie") + "|" + String(item.id) + "|" + item.slug));
+                var ym = item.year ? new Date(String(item.year) + "-01-01").getTime() : _now;
+                allVideos.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay|" + (item.type || "movie") + "|" + String(item.id) + "|" + item.slug, ym));
             }
-            sections.push(new PlatformContent({ name: "Estrenos", items: vids2, contentType: Type.Feed.Mixed }));
         }
     } catch (e) {}
-    return sections;
+    return new PlayPelisHomePager(allVideos, false, { continuationToken: null });
 }
 
 // ========== DETAILS ==========
@@ -188,10 +204,10 @@ if (typeof source !== "undefined") {
     source.setSettings = function(s) { _settings = s || {}; };
     source.enable = function(c, s) { _settings = s || {}; };
     source.getSearchCapabilities = function() { try { var ft = _feedMixed, ot = _orderChrono; if (typeof Type !== "undefined") { ft = Type.Feed.Mixed; ot = Type.Order.Chronological; } return { types: [ft], sorts: [ot], filters: [] }; } catch(e) { return { types: [2], sorts: [1], filters: [] }; } };
-    source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
+    source.search = function(query, type, order, filters, continuationToken) { return doSearch(query, type, order, filters, continuationToken); };
     source.isVideoDetailsUrl = function(url) { if (!url) return false; return url.indexOf("esplay|") === 0; };
     source.getVideoDetails = function(url) { return doDetails(url); };
-    source.getHome = function(continuationToken) { return doHome(); };
+    source.getHome = function(continuationToken) { return doHome(continuationToken); };
     source.isChannelUrl = function(url) { return false; };
     source.searchSuggestions = function(query) { return []; };
 }
