@@ -1,4 +1,4 @@
-// PlayPelis GrayJoy Source Plugin v10
+// PlayPelis GrayJoy Source Plugin v11 (debug visible en pantalla, sin PC)
 var ESPLAY_GQL = "https://api.esplay.one/graphql";
 var ESPLAY_IMG = "https://static.esplay.one/";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -75,35 +75,43 @@ class PlayPelisSearchPager extends VideoPager {
 }
 
 // ========== ESPLAY SEARCH ==========
+// OJO: sin try/catch acá adentro a propósito -- si algo falla, la excepcion
+// sube y la capturamos en doSearch() para mostrarla como resultado "DEBUG".
 function esplaySearch(query) {
     var items = [];
-    try {
-        var data = gqlPost(
-            'query mySearchItems($query: String!) { movies: showSearch(query: $query, type: "movie", limit: 15) { items { id title slug coverPath year overview type } } tvshows: showSearch(query: $query, type: "tvshow", limit: 15) { items { id title slug coverPath year overview type } } }',
-            {query: query}
-        );
-        log("esplaySearch raw response: " + JSON.stringify(data)); // <-- temporal, sacar despues
-        if (data && data.data) {
-            if (data.data.movies && data.data.movies.items) items = items.concat(data.data.movies.items);
-            if (data.data.tvshows && data.data.tvshows.items) items = items.concat(data.data.tvshows.items);
-        } else if (data && data.errors) {
-            log("esplaySearch GraphQL errors: " + JSON.stringify(data.errors)); // <-- temporal, sacar despues
-        }
-    } catch (e) {
-        log("esplaySearch exception: " + String(e)); // <-- temporal, sacar despues
+    var data = gqlPost(
+        'query mySearchItems($query: String!) { movies: showSearch(query: $query, type: "movie", limit: 15) { items { id title slug coverPath year overview type } } tvshows: showSearch(query: $query, type: "tvshow", limit: 15) { items { id title slug coverPath year overview type } } }',
+        {query: query}
+    );
+    if (data && data.errors) {
+        throw new Error("GraphQL: " + JSON.stringify(data.errors));
+    }
+    if (data && data.data) {
+        if (data.data.movies && data.data.movies.items) items = items.concat(data.data.movies.items);
+        if (data.data.tvshows && data.data.tvshows.items) items = items.concat(data.data.tvshows.items);
+    } else {
+        throw new Error("Respuesta sin data ni errors: " + JSON.stringify(data));
     }
     return items;
 }
+
 function doSearch(query, type, order, filters, continuationToken) {
     var results = [];
-    var items = esplaySearch(query);
-    for (var i = 0; i < items.length; i++) {
-        var item = items[i];
-        var typeStr = item.type === "tvshow" ? "tvshow" : "movie";
-        var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
-        var ppUrl = "esplay|" + typeStr + "|" + String(item.id) + "|" + item.slug;
-        var yearMs = item.year ? new Date(String(item.year) + "-01-01").getTime() : _now;
-        results.push(mkVideo(item.id || String(i), item.title || "Sin titulo", cover, ppUrl, yearMs));
+    try {
+        var items = esplaySearch(query);
+        if (items.length === 0) {
+            results.push(mkVideo("debug-empty", "DEBUG: 0 items devueltos por esplaySearch (query=" + query + ")", "", "esplay|debug|0|debug", _now));
+        }
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var typeStr = item.type === "tvshow" ? "tvshow" : "movie";
+            var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
+            var ppUrl = "esplay|" + typeStr + "|" + String(item.id) + "|" + item.slug;
+            var yearMs = item.year ? new Date(String(item.year) + "-01-01").getTime() : _now;
+            results.push(mkVideo(item.id || String(i), item.title || "Sin titulo", cover, ppUrl, yearMs));
+        }
+    } catch (e) {
+        results.push(mkVideo("debug-err", "DEBUG ERROR: " + String(e), "", "esplay|debug|0|debug", _now));
     }
     return new PlayPelisSearchPager(results, false, { query: query, type: type, order: order, filters: filters, continuationToken: null });
 }
