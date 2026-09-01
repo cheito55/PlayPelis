@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source Plugin
+// PlayPelis GrayJay Source Plugin v2
 var TMDB_API = "https://api.themoviedb.org/3";
 var TMDB_KEY = "26c168179ae6b5445f36aca260e00d48";
 var TMDB_IMG = "https://image.tmdb.org/t/p/w220_and_h330_face";
@@ -10,6 +10,11 @@ var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var PPID = null;
 var _settings = {};
 var GQL_ITEMS = "items { id title slug coverPath year overview type quality { type language } }";
+
+// Cache Type constants with fallbacks
+var _feedMixed = 2;
+var _orderChrono = 1;
+try { if (typeof Type !== "undefined") { _feedMixed = Type.Feed.Mixed; _orderChrono = Type.Order.Chronological; } } catch(e) {}
 
 function initPlatformID() {
     if (!PPID) PPID = new PlatformID("PlayPelis", "PlayPelis", PID);
@@ -160,8 +165,6 @@ function doHome() {
 }
 
 // ========== VIDEO EXTRACTION ==========
-
-// Helper: HTTP GET with headers, returns response body string
 function httpGet(url, headers) {
     try {
         var h = headers || {};
@@ -173,7 +176,6 @@ function httpGet(url, headers) {
     }
 }
 
-// Find all iframe src URLs from HTML
 function findIframeUrls(html) {
     var urls = [];
     var regex = /<iframe[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi;
@@ -185,7 +187,6 @@ function findIframeUrls(html) {
     return urls;
 }
 
-// Find direct m3u8 URLs in HTML
 function findM3u8Urls(html) {
     var urls = [];
     var regex = /(?:https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi;
@@ -196,7 +197,6 @@ function findM3u8Urls(html) {
     return urls;
 }
 
-// Find direct mp4 URLs in HTML
 function findMp4Urls(html) {
     var urls = [];
     var regex = /(?:https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*)/gi;
@@ -208,133 +208,90 @@ function findMp4Urls(html) {
     return urls;
 }
 
-// Extract DoodStream video URL
 function extractDood(embedUrl) {
     try {
         var html = httpGet(embedUrl);
         if (!html) return null;
-
-        // Pattern 1: look for $.get('/pass_md5/...') 
         var passMatch = html.match(/\$\.get\(['"]\/pass_md5\/([^'"]+)['"]/);
         if (passMatch) {
-            var baseUrl = embedUrl.replace(/\/embed\/.*/, "");
+            var baseUrl = embedUrl.replace(/\/embed\/.*/, "").replace(/\/d\//, "/");
             var passUrl = baseUrl + "/pass_md5/" + passMatch[1];
             var resp = httpGet(passUrl, {"Referer": embedUrl});
             if (resp && resp.indexOf("http") === 0) {
-                var token = "?token=" + (new Date().getTime()) + "& expiry=" + (new Date().getTime() + 86400000);
+                var token = "?token=" + (new Date().getTime()) + "&expiry=" + (new Date().getTime() + 86400000);
                 return resp.trim() + token;
             }
         }
-
-        // Pattern 2: look for video URL directly
         var m3u8 = findM3u8Urls(html);
         if (m3u8.length > 0) return m3u8[0];
-
         var mp4 = findMp4Urls(html);
         if (mp4.length > 0) return mp4[0];
-
-        // Pattern 3: look for data in script tags
         var vidMatch = html.match(/(?:src|file)['"]\s*:\s*['"](https?:\/\/[^'"]+\.(?:mp4|m3u8)[^'"]*)/);
         if (vidMatch) return vidMatch[1];
-
     } catch (e) {}
     return null;
 }
 
-// Extract StreamTape video URL
 function extractStreamTape(embedUrl) {
     try {
         var html = httpGet(embedUrl);
         if (!html) return null;
-
-        // StreamTape hides the URL in two parts
         var part1 = html.match(/document\.getElementById\(['"]robotlink['"]\)\.innerHTML\s*=\s*['"]([^'"]+)/);
         if (part1) {
-            var full = part1[1];
-            // Replace obfuscated chars
-            full = full.replace(/&#039;/g, "'").replace(/&amp;/g, "&");
-            // Look for the concat pattern
+            var full = part1[1].replace(/&#039;/g, "'").replace(/&amp;/g, "&");
             var part2 = html.match(/tok(?:en)?['"]\s*\+\s*['"]([^'"]+)/);
             if (part2) {
                 var url = full + part2[1];
                 if (url.indexOf("http") !== -1) return url;
             }
-            // Try direct URL
             if (full.indexOf("http") !== -1) return full;
         }
-
-        // Alternative: look for direct URLs
         var m3u8 = findM3u8Urls(html);
         if (m3u8.length > 0) return m3u8[0];
-
         var mp4 = findMp4Urls(html);
         if (mp4.length > 0) return mp4[0];
-
-        // Try to find video source in player config
         var vidMatch = html.match(/['"]file['"]\s*:\s*['"](https?:\/\/[^'"]+)/);
         if (vidMatch) return vidMatch[1];
-
     } catch (e) {}
     return null;
 }
 
-// Extract Voe (voe.sx) video URL
 function extractVoe(embedUrl) {
     try {
         var html = httpGet(embedUrl);
         if (!html) return null;
-
-        // Voe uses an XOR-encoded video URL
-        var match = html.match(/var\s+sources?\s*=\s*JSON\.parse\(['"](.*?)['"]\)/);
-        if (match) return match[1];
-
-        // Try to find direct m3u8/mp4
         var m3u8 = findM3u8Urls(html);
         if (m3u8.length > 0) return m3u8[0];
-
         var mp4 = findMp4Urls(html);
         if (mp4.length > 0) return mp4[0];
-
-        // Pattern for direct video reference
         var vidMatch = html.match(/['"](?:direct_url|video_url|source)['"]\s*:\s*['"](https?:\/\/[^'"]+)/);
         if (vidMatch) return vidMatch[1];
-
     } catch (e) {}
     return null;
 }
 
-// Extract StreamSB video URL  
 function extractStreamSB(embedUrl) {
     try {
         var html = httpGet(embedUrl);
         if (!html) return null;
-
         var m3u8 = findM3u8Urls(html);
         if (m3u8.length > 0) return m3u8[0];
-
         var mp4 = findMp4Urls(html);
         if (mp4.length > 0) return mp4[0];
-
         var vidMatch = html.match(/['"](?:source|file|video)['"]\s*:\s*['"](https?:\/\/[^'"]+)/);
         if (vidMatch) return vidMatch[1];
-
     } catch (e) {}
     return null;
 }
 
-// Generic extractor: try to find m3u8/mp4 in any embed page
 function extractGeneric(embedUrl) {
     try {
         var html = httpGet(embedUrl);
         if (!html) return null;
-
         var m3u8 = findM3u8Urls(html);
         if (m3u8.length > 0) return m3u8[0];
-
         var mp4 = findMp4Urls(html);
         if (mp4.length > 0) return mp4[0];
-
-        // Try nested iframes (one level deep)
         var iframes = findIframeUrls(html);
         for (var i = 0; i < iframes.length; i++) {
             var nested = httpGet(iframes[i], {"Referer": embedUrl});
@@ -345,22 +302,17 @@ function extractGeneric(embedUrl) {
                 if (np.length > 0) return np[0];
             }
         }
-
-        // Try JSON-encoded source
         var srcMatch = html.match(/['"]source['"]\s*:\s*['"](https?:\/\/[^'"]+\.(?:m3u8|mp4)[^'"]*)/);
         if (srcMatch) return srcMatch[1];
-
         var fileMatch = html.match(/['"]file['"]\s*:\s*['"](https?:\/\/[^'"]+\.(?:m3u8|mp4)[^'"]*)/);
         if (fileMatch) return fileMatch[1];
-
     } catch (e) {}
     return null;
 }
 
-// Route to the right extractor based on URL domain
 function extractVideoFromEmbed(embedUrl) {
     var url = embedUrl.toLowerCase();
-    if (url.indexOf("dood.") !== -1 || url.indexOf("doodstream.") !== -1 || url.indexOf("dood.wf") !== -1 || url.indexOf("dood.ws") !== -1) {
+    if (url.indexOf("dood.") !== -1 || url.indexOf("doodstream.") !== -1 || url.indexOf("dood.wf") !== -1 || url.indexOf("dood.ws") !== -1 || url.indexOf("dood.yt") !== -1 || url.indexOf("dood.to") !== -1 || url.indexOf("dood.so") !== -1 || url.indexOf("dood.la") !== -1 || url.indexOf("dood.pm") !== -1 || url.indexOf("dood.sh") !== -1) {
         return extractDood(embedUrl);
     }
     if (url.indexOf("streamtape.") !== -1) {
@@ -369,23 +321,19 @@ function extractVideoFromEmbed(embedUrl) {
     if (url.indexOf("voe.") !== -1) {
         return extractVoe(embedUrl);
     }
-    if (url.indexOf("sbembed") !== -1 || url.indexOf("sbplay") !== -1 || url.indexOf("sbbrisk") !== -1 || url.indexOf("sblongvu") !== -1 || url.indexOf("sbfull") !== -1 || url.indexOf("sbfast") !== -1 || url.indexOf("sbvideo") !== -1 || url.indexOf("streamsb.") !== -1 || url.indexOf("viewsb.") !== -1 || url.indexOf("watchsb.") !== -1 || url.indexOf("ssbstream.") !== -1 || url.indexOf("streamsss.") !== -1) {
+    if (url.indexOf("sbembed") !== -1 || url.indexOf("sbplay") !== -1 || url.indexOf("sbbrisk") !== -1 || url.indexOf("sblongvu") !== -1 || url.indexOf("sbfull") !== -1 || url.indexOf("sbfast") !== -1 || url.indexOf("streamsb.") !== -1 || url.indexOf("viewsb.") !== -1 || url.indexOf("watchsb.") !== -1 || url.indexOf("ssbstream.") !== -1 || url.indexOf("streamsss.") !== -1) {
         return extractStreamSB(embedUrl);
     }
-    // Default: try generic extraction
     return extractGeneric(embedUrl);
 }
 
-// Main: scrape a movie/show page and extract real video sources
 function scrapeVideoSources(pageUrl) {
     var sources = [];
     var seen = {};
-
     try {
         var html = httpGet(pageUrl);
         if (!html) return sources;
 
-        // First: look for direct m3u8/mp4 URLs in the page itself
         var directM3u8 = findM3u8Urls(html);
         for (var i = 0; i < directM3u8.length; i++) {
             var u = directM3u8[i];
@@ -416,16 +364,13 @@ function scrapeVideoSources(pageUrl) {
             }
         }
 
-        // If we found direct sources, return them
         if (sources.length > 0) return sources;
 
-        // Second: find iframe embed URLs and extract video from each
         var iframes = findIframeUrls(html);
         for (var i = 0; i < iframes.length; i++) {
             var embedUrl = iframes[i];
             if (seen[embedUrl]) continue;
             seen[embedUrl] = true;
-
             var videoUrl = extractVideoFromEmbed(embedUrl);
             if (videoUrl && !seen[videoUrl]) {
                 seen[videoUrl] = true;
@@ -440,7 +385,6 @@ function scrapeVideoSources(pageUrl) {
             }
         }
     } catch (e) {}
-
     return sources;
 }
 
@@ -450,18 +394,15 @@ function scrapePageDetails(pageUrl) {
     try {
         var html = httpGet(pageUrl);
         if (!html) return info;
-
         var doc = DOMParser.parseFromString(html);
         var titleNode = doc.querySelector("h1");
         info.title = titleNode ? titleNode.textContent.trim() : "";
-
         var imgNode = doc.querySelector("img[src*='poster']") || doc.querySelector(".post img") || doc.querySelector("img[alt*='poster']") || doc.querySelector(".poster img");
         if (imgNode) {
             var src = imgNode.getAttribute("src") || "";
             if (src && src.indexOf("http") === -1) src = "https://pelisplus2.ai" + src;
             info.thumbnail = src;
         }
-
         var descNode = doc.querySelector(".description") || doc.querySelector(".extract") || doc.querySelector("p");
         info.description = descNode ? descNode.textContent.trim().substring(0, 500) : "";
     } catch (e) {}
@@ -484,7 +425,6 @@ function findEsplayForTmdb(title, isTv) {
 function doDetails(url) {
     if (!url) return mkDetail("", "PlayPelis", "", "", [], "Sin URL");
 
-    // TMDB URL: look up esplay match and scrape video from pelisplus
     if (url.indexOf("themoviedb.org") !== -1) {
         var mMovie = url.match(/\/movie\/(-?\d+)/);
         var mTv = url.match(/\/tv\/(-?\d+)/);
@@ -508,7 +448,6 @@ function doDetails(url) {
                     var finalThumb = thumb || esplayCover;
                     var sources = scrapeVideoSources(pelisUrl);
                     if (sources.length === 0) {
-                        // Try alternative domains
                         var altDomains = ["pelisplushd.nu", "pelisplushd.nz", "cuevana3.ai"];
                         for (var d = 0; d < altDomains.length && sources.length === 0; d++) {
                             var altUrl = "https://" + altDomains[d] + "/" + (isTv ? "serie" : "pelicula") + "/" + esItem.slug;
@@ -518,7 +457,6 @@ function doDetails(url) {
                     return mkDetail(pelisUrl, name, finalThumb, pelisUrl, sources, overview);
                 }
 
-                // No esplay match, still try TMDB info
                 return mkDetail(url, name || "Sin titulo", thumb, url, [], overview);
             } catch (e) {
                 return mkDetail(url, "Error", "", url, [], "Error al cargar: " + String(e));
@@ -526,7 +464,6 @@ function doDetails(url) {
         }
     }
 
-    // Pelisplus URL: scrape directly
     if (url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1) {
         try {
             var pageDetails = scrapePageDetails(url);
@@ -541,15 +478,27 @@ function doDetails(url) {
 }
 
 // ========== SOURCE BINDINGS ==========
-source.setSettings = function(s) { _settings = s || {}; };
-source.enable = function(c, s) { _settings = s || {}; };
-source.getSearchCapabilities = function() { return { types: [Type.Feed.Mixed], sorts: [Type.Order.Chronological], filters: [] }; };
-source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
-source.isVideoDetailsUrl = function(url) {
-    if (!url) return false;
-    return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1;
-};
-source.getVideoDetails = function(url) { return doDetails(url); };
-source.getHome = function(continuationToken) { return doHome(); };
-source.isChannelUrl = function(url) { return false; };
-source.searchSuggestions = function(query) { return []; };
+// Guard: only bind if source object exists (injected by GrayJay)
+if (typeof source !== "undefined") {
+    source.setSettings = function(s) { _settings = s || {}; };
+    source.enable = function(c, s) { _settings = s || {}; };
+    source.getSearchCapabilities = function() {
+        try {
+            var ft = _feedMixed;
+            var ot = _orderChrono;
+            if (typeof Type !== "undefined") { ft = Type.Feed.Mixed; ot = Type.Order.Chronological; }
+            return { types: [ft], sorts: [ot], filters: [] };
+        } catch(e) {
+            return { types: [2], sorts: [1], filters: [] };
+        }
+    };
+    source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
+    source.isVideoDetailsUrl = function(url) {
+        if (!url) return false;
+        return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1;
+    };
+    source.getVideoDetails = function(url) { return doDetails(url); };
+    source.getHome = function(continuationToken) { return doHome(); };
+    source.isChannelUrl = function(url) { return false; };
+    source.searchSuggestions = function(query) { return []; };
+}
