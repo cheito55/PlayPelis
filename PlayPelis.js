@@ -157,31 +157,84 @@ function doSearch(query) {
 }
 
 function doDetails(url) {
+    // 1. Si el enlace es de TMDB, solo mostramos metadatos (no hay video aquí)
     try {
-        var mMovie = url.match(/\/movie\/(-?\d+)/);
-        var mTv = url.match(/\/tv\/(-?\d+)/);
-        var tmdbId = -1;
-        if (mMovie) tmdbId = parseInt(mMovie[1]);
-        if (mTv) tmdbId = parseInt(mTv[1]);
-        if (tmdbId > 0) {
-            var isTv = !!mTv;
-            var ep = isTv ? "/tv/" : "/movie/";
-            var detail = tmdbGet(ep + tmdbId, {"language": "es"});
-            var name = detail.name || detail.title || "PlayPelis";
-            var thumb = detail.backdrop_path ? TMDB_BK + detail.backdrop_path : "";
-            return mkDetail(url, name, thumb, url);
+        if (url.indexOf("themoviedb.org") !== -1) {
+            var mMovie = url.match(/\/movie\/(-?\d+)/);
+            var mTv = url.match(/\/tv\/(-?\d+)/);
+            var tmdbId = -1;
+            if (mMovie) tmdbId = parseInt(mMovie[1]);
+            if (mTv) tmdbId = parseInt(mTv[1]);
+            
+            if (tmdbId > 0) {
+                var isTv = !!mTv;
+                var ep = isTv ? "/tv/" : "/movie/";
+                var detail = tmdbGet(ep + tmdbId, {"language": "es"});
+                var name = detail.name || detail.title || "PlayPelis";
+                var thumb = detail.backdrop_path ? TMDB_BK + detail.backdrop_path : "";
+                return mkDetail(url, name, thumb, url);
+            }
         }
     } catch (e) {}
+
+    // 2. Si el enlace es de una fuente real (ejemplo: pelisplus2.ai)
+    if (url.indexOf("pelisplus2.ai") !== -1) {
+        try {
+            // Hacemos la petición a la página de la película
+            var resp = http.GET(url, {});
+            var html = resp.body;
+
+            // Utilizamos Regex para buscar el enlace del iframe o del video en el HTML.
+            // NOTA: Esta expresión regular debe ajustarse a la estructura exacta del código fuente de pelisplus2.ai.
+            var videoUrl = "";
+            var iframeMatch = html.match(/<iframe[^>]+src="([^"]+)"/i);
+            
+            if (iframeMatch && iframeMatch.length > 1) {
+                videoUrl = iframeMatch[1]; 
+            }
+
+            // Armamos las fuentes de video para GrayJay
+            var sources = [];
+            if (videoUrl !== "") {
+                sources.push(new VideoUrlSource({
+                    width: 1280,
+                    height: 720,
+                    container: "video/mp4", // Cambiar a application/x-mpegURL si es .m3u8
+                    codec: "avc1.4d401f",
+                    name: "Servidor Principal",
+                    bitrate: 2000000,
+                    duration: 0,
+                    url: videoUrl
+                }));
+            }
+
+            // Extraemos el título usando DOMParser
+            var doc = DOMParser.parseFromString(html);
+            var titleNode = doc.querySelector("h1");
+            var title = titleNode ? titleNode.textContent : "Película Scrapeada";
+
+            initPlatformID();
+            return new PlatformVideoDetails({
+                id: new PlatformID("PlayPelis", url, PID),
+                name: title,
+                thumbnails: new Thumbnails([]),
+                author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app"),
+                uploadDate: 0,
+                url: url,
+                duration: 0,
+                viewCount: 0,
+                isLive: false,
+                description: "Reproduciendo desde fuente externa",
+                video: new MuxVideoSourceDescriptor({
+                    isUnMuxed: false,
+                    videoSources: sources
+                })
+            });
+        } catch (e) {
+            // Manejo de errores de conexión o parseo
+        }
+    }
+
+    // Retorno por defecto si falla o la URL no coincide
     return mkDetail(url, "PlayPelis", "", url);
 }
-
-// GrayJay source bindings
-source.setSettings = function(s) { _settings = s || {}; };
-source.enable = function(c, s) { _settings = s || {}; };
-source.getSearchCapabilities = function() { return { types: [Type.Feed.Mixed], sorts: [Type.Order.Chronological], filters: [] }; };
-source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
-source.isVideoDetailsUrl = function(url) { if (!url) return false; return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus2.ai/") !== -1; };
-source.getVideoDetails = function(url) { return doDetails(url); };
-source.getHome = function(continuationToken) { return doHome(); };
-source.isChannelUrl = function(url) { return false; };
-source.searchSuggestions = function(query) { return []; };
