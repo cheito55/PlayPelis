@@ -1,4 +1,4 @@
-// PlayPelis GrayJoy Source Plugin v7 - Solo esplay, sin TMDB
+// PlayPelis GrayJoy Source Plugin v8
 var ESPLAY_GQL = "https://api.esplay.one/graphql";
 var ESPLAY_IMG = "https://static.esplay.one/";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -62,12 +62,18 @@ function mkDetail(id, name, thumb, url, videoUrls, description) {
     return null;
 }
 
-// ========== ESPLAY SEARCH ==========
+// ========== ESPLAY SEARCH (usa showSearch como la APK) ==========
 function esplaySearch(query) {
     var items = [];
     try {
-        var data = gqlPost("{ search(query: \"" + query.replace(/"/g, '\\"') + "\", page: 1, limit: 15) { items { id title slug coverPath year overview type } } }", {});
-        if (data && data.data && data.data.search && data.data.search.items) items = data.data.search.items;
+        var data = gqlPost(
+            'query mySearchItems($query: String!) { movies: showSearch(query: $query, type: "movie", limit: 15) { items { id title slug coverPath year overview type } } tvshows: showSearch(query: $query, type: "tvshow", limit: 15) { items { id title slug coverPath year overview type } } }',
+            {query: query}
+        );
+        if (data && data.data) {
+            if (data.data.movies && data.data.movies.items) items = items.concat(data.data.movies.items);
+            if (data.data.tvshows && data.data.tvshows.items) items = items.concat(data.data.tvshows.items);
+        }
     } catch (e) {}
     return items;
 }
@@ -79,7 +85,7 @@ function doSearch(query) {
         var item = items[i];
         var typeStr = item.type === "tvshow" ? "tvshow" : "movie";
         var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
-        var ppUrl = "esplay:" + typeStr + ":" + item.id + ":" + item.slug;
+        var ppUrl = "esplay|" + typeStr + "|" + String(item.id) + "|" + item.slug;
         results.push(mkVideo(item.id || String(i), item.title || "Sin titulo", cover, ppUrl));
     }
     return results;
@@ -88,26 +94,26 @@ function doSearch(query) {
 // ========== ESPLAY VIDEO LINKS ==========
 function esplayGetVideoLinks(itemId) {
     var videoUrls = [];
+    // Links (peliculas)
     try {
-        // Intentar links (peliculas)
-        var resp = gqlPost("query { links(itemId: \"" + itemId + "\") { mirrors { language url quality server type status } } }", {});
+        var resp = gqlPost("query videoLinks($itemId: String!) { links(itemId: $itemId) { mirrors { language url quality server type status } } }", {itemId: String(itemId)});
         if (resp && resp.data && resp.data.links && resp.data.links.mirrors) {
             var mirrors = resp.data.links.mirrors;
             for (var i = 0; i < mirrors.length; i++) {
                 var m = mirrors[i];
-                if (m.url) videoUrls.push({url: m.url, name: (m.server || "") + " " + (m.language || "") + " " + (m.quality || "")});
+                if (m.url) videoUrls.push({url: m.url, name: ((m.server || "") + " " + (m.language || "") + " " + (m.quality || "")).trim()});
             }
         }
     } catch (e) {}
+    // Videos (episodios)
     if (videoUrls.length === 0) {
         try {
-            // Intentar videos (episodios)
-            var resp2 = gqlPost("query { videos(itemId: \"" + itemId + "\") { language url quality server type status } }", {});
+            var resp2 = gqlPost("query queryVideos($itemId: String!) { videos(itemId: $itemId) { language url quality server type status } }", {itemId: String(itemId)});
             if (resp2 && resp2.data && resp2.data.videos) {
                 var vids = resp2.data.videos;
                 for (var i = 0; i < vids.length; i++) {
                     var v = vids[i];
-                    if (v.url) videoUrls.push({url: v.url, name: (v.server || "") + " " + (v.language || "") + " " + (v.quality || "")});
+                    if (v.url) videoUrls.push({url: v.url, name: ((v.server || "") + " " + (v.language || "") + " " + (v.quality || "")).trim()});
                 }
             }
         } catch (e) {}
@@ -126,7 +132,7 @@ function doHome() {
             for (var i = 0; i < items.length; i++) {
                 var item = items[i];
                 var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
-                vids.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay:" + (item.type || "movie") + ":" + item.id + ":" + item.slug));
+                vids.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay|" + (item.type || "movie") + "|" + String(item.id) + "|" + item.slug));
             }
             sections.push(new PlatformContent({ name: "Recientes", items: vids, contentType: Type.Feed.Mixed }));
         }
@@ -139,7 +145,7 @@ function doHome() {
             for (var i = 0; i < items2.length; i++) {
                 var item = items2[i];
                 var cover = item.coverPath ? (ESPLAY_IMG + item.coverPath + "/cover/original") : "";
-                vids2.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay:" + (item.type || "movie") + ":" + item.id + ":" + item.slug));
+                vids2.push(mkVideo(item.id, item.title || "Sin titulo", cover, "esplay|" + (item.type || "movie") + "|" + String(item.id) + "|" + item.slug));
             }
             sections.push(new PlatformContent({ name: "Estrenos", items: vids2, contentType: Type.Feed.Mixed }));
         }
@@ -150,18 +156,18 @@ function doHome() {
 // ========== DETAILS ==========
 function doDetails(url) {
     if (!url) return mkDetail("", "PlayPelis", "", "", [], "Sin URL");
-    if (url.indexOf("esplay:") !== 0) return mkDetail(url, "PlayPelis", "", url, [], "Contenido de PlayPelis");
+    if (url.indexOf("esplay|") !== 0) return mkDetail(url, "PlayPelis", "", url, [], "Contenido de PlayPelis");
     try {
-        var parts = url.split(":");
+        var parts = url.split("|");
         var type = parts[1] || "movie";
         var itemId = parts[2] || "";
         var slug = parts[3] || "";
-        // Metadata from esplay
         var name = slug;
         var thumb = "";
         var desc = "";
+        // Metadata desde esplay
         try {
-            var gqlResp = gqlPost("query { show(type: \"" + type + "\", slug: \"" + slug + "\") { id title overview coverPath year duration } }", {});
+            var gqlResp = gqlPost("query showItem($type: String!, $slug: String!) { show(type: $type, slug: $slug) { id title overview coverPath year duration } }", {type: type, slug: slug});
             if (gqlResp && gqlResp.data && gqlResp.data.show) {
                 var d = gqlResp.data.show;
                 name = d.title || slug;
@@ -169,7 +175,7 @@ function doDetails(url) {
                 desc = d.overview || "";
             }
         } catch (e) {}
-        // Video URLs
+        // URLs de video desde esplay
         var videoList = esplayGetVideoLinks(itemId);
         return mkDetail(itemId, name, thumb, url, videoList, desc);
     } catch (e) {
@@ -183,7 +189,7 @@ if (typeof source !== "undefined") {
     source.enable = function(c, s) { _settings = s || {}; };
     source.getSearchCapabilities = function() { try { var ft = _feedMixed, ot = _orderChrono; if (typeof Type !== "undefined") { ft = Type.Feed.Mixed; ot = Type.Order.Chronological; } return { types: [ft], sorts: [ot], filters: [] }; } catch(e) { return { types: [2], sorts: [1], filters: [] }; } };
     source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
-    source.isVideoDetailsUrl = function(url) { if (!url) return false; return url.indexOf("esplay:") === 0; };
+    source.isVideoDetailsUrl = function(url) { if (!url) return false; return url.indexOf("esplay|") === 0; };
     source.getVideoDetails = function(url) { return doDetails(url); };
     source.getHome = function(continuationToken) { return doHome(); };
     source.isChannelUrl = function(url) { return false; };
