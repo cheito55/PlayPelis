@@ -1,4 +1,5 @@
-// PlayPelis GrayJay Source Plugin v2
+// PlayPelis GrayJoy Source Plugin v3
+// API classes: PlatformVideoDetails, VideoSourceDescriptor, VideoUrlSource, HLSSource
 var TMDB_API = "https://api.themoviedb.org/3";
 var TMDB_KEY = "26c168179ae6b5445f36aca260e00d48";
 var TMDB_IMG = "https://image.tmdb.org/t/p/w220_and_h330_face";
@@ -59,22 +60,83 @@ function mkVideo(id, title, thumb, url, date) {
     });
 }
 
-function mkDetail(id, name, thumb, url, sources, description) {
+function mkVideoSource(url, name, isHls) {
+    try {
+        if (isHls || url.indexOf(".m3u8") !== -1) {
+            if (typeof HLSSource !== "undefined") {
+                return new HLSSource({ url: url, name: name, duration: 0 });
+            }
+            return new VideoUrlSource({
+                width: 1920, height: 1080,
+                container: "application/x-mpegURL",
+                codec: "avc1.640028",
+                name: name, bitrate: 4000000, duration: 0, url: url
+            });
+        }
+        return new VideoUrlSource({
+            width: 1920, height: 1080,
+            container: "video/mp4",
+            codec: "avc1.640028",
+            name: name, bitrate: 4000000, duration: 0, url: url
+        });
+    } catch(e) {
+        // Fallback: create plain object with correct structure
+        return {
+            plugin_type: isHls || url.indexOf(".m3u8") !== -1 ? "HLSSource" : "VideoUrlSource",
+            width: 1920, height: 1080,
+            container: isHls || url.indexOf(".m3u8") !== -1 ? "application/x-mpegURL" : "video/mp4",
+            codec: "avc1.640028",
+            name: name, bitrate: 4000000, duration: 0, url: url
+        };
+    }
+}
+
+function mkVideoDescriptor(videoSources) {
+    try {
+        // GrayJoy API: class is VideoSourceDescriptor, plugin_type is "MuxVideoSourceDescriptor"
+        return new VideoSourceDescriptor(videoSources);
+    } catch(e) {
+        try {
+            // Fallback: some versions might use MuxVideoSourceDescriptor directly
+            return new MuxVideoSourceDescriptor({isUnMuxed: false, videoSources: videoSources});
+        } catch(e2) {
+            // Last resort: plain object
+            return { plugin_type: "MuxVideoSourceDescriptor", videoSources: videoSources };
+        }
+    }
+}
+
+function mkDetail(id, name, thumb, url, videoUrls, description) {
     initPlatformID();
-    var videoSources = sources || [];
-    return new PlatformVideoDetails({
-        id: new PlatformID("PlayPelis", String(id), PID),
-        name: name || "PlayPelis",
-        thumbnails: mkThumb(thumb),
-        author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app"),
-        uploadDate: 0,
-        url: url,
-        duration: 0,
-        viewCount: 0,
-        isLive: false,
-        description: description || "Contenido de PlayPelis",
-        video: new MuxVideoSourceDescriptor({isUnMuxed: false, videoSources: videoSources})
-    });
+    var sources = [];
+    for (var i = 0; i < videoUrls.length; i++) {
+        var isHls = videoUrls[i].indexOf(".m3u8") !== -1;
+        sources.push(mkVideoSource(videoUrls[i], "Servidor " + (i + 1), isHls));
+    }
+    var videoDesc = mkVideoDescriptor(sources);
+    try {
+        return new PlatformVideoDetails({
+            id: new PlatformID("PlayPelis", String(id), PID),
+            name: name || "PlayPelis",
+            thumbnails: mkThumb(thumb),
+            author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app"),
+            uploadDate: 0,
+            url: url,
+            duration: 0,
+            viewCount: 0,
+            isLive: false,
+            description: description || "Contenido de PlayPelis",
+            video: videoDesc,
+            rating: { likes: 0, dislikes: 0 }
+        });
+    } catch(e) {
+        // Fallback: use PlatformVideo if PlatformVideoDetails not available
+        var v = mkVideo(id, name, thumb, url, 0);
+        v.description = description || "";
+        v.video = videoDesc;
+        v.rating = { likes: 0, dislikes: 0 };
+        return v;
+    }
 }
 
 // ========== SEARCH ==========
@@ -137,7 +199,7 @@ function doSearch(query) {
             for (var i = 0; i < tmdbs.length; i++) results.push(tmdbs[i]);
         } catch (e) {}
     }
-    return new VideoPager(results, false, null);
+    return new VideoPager(results, false);
 }
 
 // ========== HOME ==========
@@ -161,7 +223,7 @@ function doHome() {
             }
         }
     } catch (e) {}
-    return new VideoPager(results, false, null);
+    return new VideoPager(results, false);
 }
 
 // ========== VIDEO EXTRACTION ==========
@@ -171,9 +233,7 @@ function httpGet(url, headers) {
         if (!h["User-Agent"]) h["User-Agent"] = UA;
         var resp = http.GET(url, h);
         return resp.body || "";
-    } catch (e) {
-        return "";
-    }
+    } catch (e) { return ""; }
 }
 
 function findIframeUrls(html) {
@@ -191,9 +251,7 @@ function findM3u8Urls(html) {
     var urls = [];
     var regex = /(?:https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi;
     var match;
-    while ((match = regex.exec(html)) !== null) {
-        urls.push(match[0].replace(/['"]/g, ""));
-    }
+    while ((match = regex.exec(html)) !== null) urls.push(match[0].replace(/['"]/g, ""));
     return urls;
 }
 
@@ -217,17 +275,12 @@ function extractDood(embedUrl) {
             var baseUrl = embedUrl.replace(/\/embed\/.*/, "").replace(/\/d\//, "/");
             var passUrl = baseUrl + "/pass_md5/" + passMatch[1];
             var resp = httpGet(passUrl, {"Referer": embedUrl});
-            if (resp && resp.indexOf("http") === 0) {
-                var token = "?token=" + (new Date().getTime()) + "&expiry=" + (new Date().getTime() + 86400000);
-                return resp.trim() + token;
-            }
+            if (resp && resp.indexOf("http") === 0) return resp.trim() + "?token=" + new Date().getTime();
         }
-        var m3u8 = findM3u8Urls(html);
-        if (m3u8.length > 0) return m3u8[0];
-        var mp4 = findMp4Urls(html);
-        if (mp4.length > 0) return mp4[0];
-        var vidMatch = html.match(/(?:src|file)['"]\s*:\s*['"](https?:\/\/[^'"]+\.(?:mp4|m3u8)[^'"]*)/);
-        if (vidMatch) return vidMatch[1];
+        var m = findM3u8Urls(html);
+        if (m.length > 0) return m[0];
+        m = findMp4Urls(html);
+        if (m.length > 0) return m[0];
     } catch (e) {}
     return null;
 }
@@ -238,48 +291,15 @@ function extractStreamTape(embedUrl) {
         if (!html) return null;
         var part1 = html.match(/document\.getElementById\(['"]robotlink['"]\)\.innerHTML\s*=\s*['"]([^'"]+)/);
         if (part1) {
-            var full = part1[1].replace(/&#039;/g, "'").replace(/&amp;/g, "&");
+            var full = part1[1].replace(/&#039;/g, "'");
             var part2 = html.match(/tok(?:en)?['"]\s*\+\s*['"]([^'"]+)/);
-            if (part2) {
-                var url = full + part2[1];
-                if (url.indexOf("http") !== -1) return url;
-            }
+            if (part2 && (full + part2[1]).indexOf("http") !== -1) return full + part2[1];
             if (full.indexOf("http") !== -1) return full;
         }
-        var m3u8 = findM3u8Urls(html);
-        if (m3u8.length > 0) return m3u8[0];
-        var mp4 = findMp4Urls(html);
-        if (mp4.length > 0) return mp4[0];
-        var vidMatch = html.match(/['"]file['"]\s*:\s*['"](https?:\/\/[^'"]+)/);
-        if (vidMatch) return vidMatch[1];
-    } catch (e) {}
-    return null;
-}
-
-function extractVoe(embedUrl) {
-    try {
-        var html = httpGet(embedUrl);
-        if (!html) return null;
-        var m3u8 = findM3u8Urls(html);
-        if (m3u8.length > 0) return m3u8[0];
-        var mp4 = findMp4Urls(html);
-        if (mp4.length > 0) return mp4[0];
-        var vidMatch = html.match(/['"](?:direct_url|video_url|source)['"]\s*:\s*['"](https?:\/\/[^'"]+)/);
-        if (vidMatch) return vidMatch[1];
-    } catch (e) {}
-    return null;
-}
-
-function extractStreamSB(embedUrl) {
-    try {
-        var html = httpGet(embedUrl);
-        if (!html) return null;
-        var m3u8 = findM3u8Urls(html);
-        if (m3u8.length > 0) return m3u8[0];
-        var mp4 = findMp4Urls(html);
-        if (mp4.length > 0) return mp4[0];
-        var vidMatch = html.match(/['"](?:source|file|video)['"]\s*:\s*['"](https?:\/\/[^'"]+)/);
-        if (vidMatch) return vidMatch[1];
+        var m = findM3u8Urls(html);
+        if (m.length > 0) return m[0];
+        m = findMp4Urls(html);
+        if (m.length > 0) return m[0];
     } catch (e) {}
     return null;
 }
@@ -288,10 +308,10 @@ function extractGeneric(embedUrl) {
     try {
         var html = httpGet(embedUrl);
         if (!html) return null;
-        var m3u8 = findM3u8Urls(html);
-        if (m3u8.length > 0) return m3u8[0];
-        var mp4 = findMp4Urls(html);
-        if (mp4.length > 0) return mp4[0];
+        var m = findM3u8Urls(html);
+        if (m.length > 0) return m[0];
+        m = findMp4Urls(html);
+        if (m.length > 0) return m[0];
         var iframes = findIframeUrls(html);
         for (var i = 0; i < iframes.length; i++) {
             var nested = httpGet(iframes[i], {"Referer": embedUrl});
@@ -302,90 +322,37 @@ function extractGeneric(embedUrl) {
                 if (np.length > 0) return np[0];
             }
         }
-        var srcMatch = html.match(/['"]source['"]\s*:\s*['"](https?:\/\/[^'"]+\.(?:m3u8|mp4)[^'"]*)/);
-        if (srcMatch) return srcMatch[1];
-        var fileMatch = html.match(/['"]file['"]\s*:\s*['"](https?:\/\/[^'"]+\.(?:m3u8|mp4)[^'"]*)/);
-        if (fileMatch) return fileMatch[1];
     } catch (e) {}
     return null;
 }
 
 function extractVideoFromEmbed(embedUrl) {
     var url = embedUrl.toLowerCase();
-    if (url.indexOf("dood.") !== -1 || url.indexOf("doodstream.") !== -1 || url.indexOf("dood.wf") !== -1 || url.indexOf("dood.ws") !== -1 || url.indexOf("dood.yt") !== -1 || url.indexOf("dood.to") !== -1 || url.indexOf("dood.so") !== -1 || url.indexOf("dood.la") !== -1 || url.indexOf("dood.pm") !== -1 || url.indexOf("dood.sh") !== -1) {
-        return extractDood(embedUrl);
-    }
-    if (url.indexOf("streamtape.") !== -1) {
-        return extractStreamTape(embedUrl);
-    }
-    if (url.indexOf("voe.") !== -1) {
-        return extractVoe(embedUrl);
-    }
-    if (url.indexOf("sbembed") !== -1 || url.indexOf("sbplay") !== -1 || url.indexOf("sbbrisk") !== -1 || url.indexOf("sblongvu") !== -1 || url.indexOf("sbfull") !== -1 || url.indexOf("sbfast") !== -1 || url.indexOf("streamsb.") !== -1 || url.indexOf("viewsb.") !== -1 || url.indexOf("watchsb.") !== -1 || url.indexOf("ssbstream.") !== -1 || url.indexOf("streamsss.") !== -1) {
-        return extractStreamSB(embedUrl);
-    }
+    if (url.indexOf("dood.") !== -1 || url.indexOf("doodstream.") !== -1) return extractDood(embedUrl);
+    if (url.indexOf("streamtape.") !== -1) return extractStreamTape(embedUrl);
     return extractGeneric(embedUrl);
 }
 
-function scrapeVideoSources(pageUrl) {
-    var sources = [];
+function scrapeVideoUrls(pageUrl) {
+    var videoUrls = [];
     var seen = {};
     try {
         var html = httpGet(pageUrl);
-        if (!html) return sources;
-
-        var directM3u8 = findM3u8Urls(html);
-        for (var i = 0; i < directM3u8.length; i++) {
-            var u = directM3u8[i];
-            if (!seen[u]) {
-                seen[u] = true;
-                sources.push(new VideoUrlSource({
-                    width: 1920, height: 1080,
-                    container: "application/x-mpegURL",
-                    codec: "avc1.640028",
-                    name: "HLS " + (sources.length + 1),
-                    bitrate: 4000000, duration: 0, url: u
-                }));
-            }
-        }
-
-        var directMp4 = findMp4Urls(html);
-        for (var i = 0; i < directMp4.length; i++) {
-            var u = directMp4[i];
-            if (!seen[u]) {
-                seen[u] = true;
-                sources.push(new VideoUrlSource({
-                    width: 1920, height: 1080,
-                    container: "video/mp4",
-                    codec: "avc1.640028",
-                    name: "MP4 " + (sources.length + 1),
-                    bitrate: 4000000, duration: 0, url: u
-                }));
-            }
-        }
-
-        if (sources.length > 0) return sources;
-
+        if (!html) return videoUrls;
+        var m = findM3u8Urls(html);
+        for (var i = 0; i < m.length; i++) { if (!seen[m[i]]) { seen[m[i]] = true; videoUrls.push(m[i]); } }
+        var p = findMp4Urls(html);
+        for (var i = 0; i < p.length; i++) { if (!seen[p[i]]) { seen[p[i]] = true; videoUrls.push(p[i]); } }
+        if (videoUrls.length > 0) return videoUrls;
         var iframes = findIframeUrls(html);
         for (var i = 0; i < iframes.length; i++) {
-            var embedUrl = iframes[i];
-            if (seen[embedUrl]) continue;
-            seen[embedUrl] = true;
-            var videoUrl = extractVideoFromEmbed(embedUrl);
-            if (videoUrl && !seen[videoUrl]) {
-                seen[videoUrl] = true;
-                var isHls = videoUrl.indexOf(".m3u8") !== -1;
-                sources.push(new VideoUrlSource({
-                    width: 1920, height: 1080,
-                    container: isHls ? "application/x-mpegURL" : "video/mp4",
-                    codec: "avc1.640028",
-                    name: "Servidor " + (sources.length + 1),
-                    bitrate: 4000000, duration: 0, url: videoUrl
-                }));
-            }
+            if (seen[iframes[i]]) continue;
+            seen[iframes[i]] = true;
+            var v = extractVideoFromEmbed(iframes[i]);
+            if (v && !seen[v]) { seen[v] = true; videoUrls.push(v); }
         }
     } catch (e) {}
-    return sources;
+    return videoUrls;
 }
 
 // ========== PAGE DETAILS ==========
@@ -413,9 +380,7 @@ function findEsplayForTmdb(title, isTv) {
     try {
         var items = searchEsplay(title);
         var wantedType = isTv ? "tvshow" : "movie";
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].type === wantedType) return items[i];
-        }
+        for (var i = 0; i < items.length; i++) { if (items[i].type === wantedType) return items[i]; }
         if (items.length > 0) return items[0];
     } catch (e) {}
     return null;
@@ -424,14 +389,12 @@ function findEsplayForTmdb(title, isTv) {
 // ========== DETAILS ==========
 function doDetails(url) {
     if (!url) return mkDetail("", "PlayPelis", "", "", [], "Sin URL");
-
     if (url.indexOf("themoviedb.org") !== -1) {
         var mMovie = url.match(/\/movie\/(-?\d+)/);
         var mTv = url.match(/\/tv\/(-?\d+)/);
         var tmdbId = -1;
         if (mMovie) tmdbId = parseInt(mMovie[1]);
         if (mTv) tmdbId = parseInt(mTv[1]);
-
         if (tmdbId > 0) {
             var isTv = !!mTv;
             var ep = isTv ? "/tv/" : "/movie/";
@@ -440,57 +403,48 @@ function doDetails(url) {
                 var name = detail.name || detail.title || "";
                 var thumb = detail.backdrop_path ? TMDB_BK + detail.backdrop_path : (detail.poster_path ? TMDB_IMG + detail.poster_path : "");
                 var overview = detail.overview || "";
-
                 var esItem = findEsplayForTmdb(name, isTv);
                 if (esItem) {
                     var pelisUrl = "https://pelisplus2.ai/" + (isTv ? "serie" : "pelicula") + "/" + esItem.slug;
                     var esplayCover = esItem.coverPath ? (ESPLAY_IMG + esItem.coverPath + "/cover/original") : "";
-                    var finalThumb = thumb || esplayCover;
-                    var sources = scrapeVideoSources(pelisUrl);
+                    var sources = scrapeVideoUrls(pelisUrl);
                     if (sources.length === 0) {
                         var altDomains = ["pelisplushd.nu", "pelisplushd.nz", "cuevana3.ai"];
                         for (var d = 0; d < altDomains.length && sources.length === 0; d++) {
                             var altUrl = "https://" + altDomains[d] + "/" + (isTv ? "serie" : "pelicula") + "/" + esItem.slug;
-                            sources = scrapeVideoSources(altUrl);
+                            sources = scrapeVideoUrls(altUrl);
                         }
                     }
-                    return mkDetail(pelisUrl, name, finalThumb, pelisUrl, sources, overview);
+                    return mkDetail(pelisUrl, name, thumb || esplayCover, pelisUrl, sources, overview);
                 }
-
                 return mkDetail(url, name || "Sin titulo", thumb, url, [], overview);
             } catch (e) {
-                return mkDetail(url, "Error", "", url, [], "Error al cargar: " + String(e));
+                return mkDetail(url, "Error", "", url, [], "Error: " + String(e));
             }
         }
     }
-
     if (url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1) {
         try {
-            var pageDetails = scrapePageDetails(url);
-            var sources = scrapeVideoSources(url);
-            return mkDetail(url, pageDetails.title || "Contenido", pageDetails.thumbnail || "", url, sources, pageDetails.description || "");
+            var pd = scrapePageDetails(url);
+            var sources = scrapeVideoUrls(url);
+            return mkDetail(url, pd.title || "Contenido", pd.thumbnail || "", url, sources, pd.description || "");
         } catch (e) {
             return mkDetail(url, "Error", "", url, [], "Error: " + String(e));
         }
     }
-
     return mkDetail(url, "PlayPelis", "", url, [], "Contenido de PlayPelis");
 }
 
 // ========== SOURCE BINDINGS ==========
-// Guard: only bind if source object exists (injected by GrayJay)
 if (typeof source !== "undefined") {
     source.setSettings = function(s) { _settings = s || {}; };
     source.enable = function(c, s) { _settings = s || {}; };
     source.getSearchCapabilities = function() {
         try {
-            var ft = _feedMixed;
-            var ot = _orderChrono;
+            var ft = _feedMixed, ot = _orderChrono;
             if (typeof Type !== "undefined") { ft = Type.Feed.Mixed; ot = Type.Order.Chronological; }
             return { types: [ft], sorts: [ot], filters: [] };
-        } catch(e) {
-            return { types: [2], sorts: [1], filters: [] };
-        }
+        } catch(e) { return { types: [2], sorts: [1], filters: [] }; }
     };
     source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
     source.isVideoDetailsUrl = function(url) {
