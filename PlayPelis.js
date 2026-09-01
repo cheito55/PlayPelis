@@ -54,8 +54,9 @@ function mkVideo(id, title, thumb, url, date) {
     });
 }
 
-function mkDetail(id, name, thumb, url) {
+function mkDetail(id, name, thumb, url, sources, description) {
     initPlatformID();
+    var videoSources = sources || [];
     return new PlatformVideoDetails({
         id: new PlatformID("PlayPelis", String(id), PID),
         name: name || "PlayPelis",
@@ -66,8 +67,8 @@ function mkDetail(id, name, thumb, url) {
         duration: 0,
         viewCount: 0,
         isLive: false,
-        description: "Contenido de PlayPelis",
-        video: new MuxVideoSourceDescriptor({isUnMuxed: false, videoSources: []})
+        description: description || "Contenido de PlayPelis",
+        video: new MuxVideoSourceDescriptor({isUnMuxed: false, videoSources: videoSources})
     });
 }
 
@@ -156,83 +157,145 @@ function doSearch(query) {
     return new VideoPager(results, false, null);
 }
 
-function doDetails(url) {
+function scrapeIframes(pageUrl) {
+    var sources = [];
     try {
-        if (url.indexOf("themoviedb.org") !== -1) {
-            var mMovie = url.match(/\/movie\/(-?\d+)/);
-            var mTv = url.match(/\/tv\/(-?\d+)/);
-            var tmdbId = -1;
-            if (mMovie) tmdbId = parseInt(mMovie[1]);
-            if (mTv) tmdbId = parseInt(mTv[1]);
-            
-            if (tmdbId > 0) {
-                var isTv = !!mTv;
-                var ep = isTv ? "/tv/" : "/movie/";
-                var detail = tmdbGet(ep + tmdbId, {"language": "es"});
-                var name = detail.name || detail.title || "PlayPelis";
-                var thumb = detail.backdrop_path ? TMDB_BK + detail.backdrop_path : "";
-                return mkDetail(url, name, thumb, url);
-            }
-        }
-    } catch (e) {}
-
-    if (url.indexOf("pelisplus2.ai") !== -1) {
-        try {
-            var resp = http.GET(url, {});
-            var html = resp.body;
-            var videoUrl = "";
-            var iframeMatch = html.match(/<iframe[^>]+src="([^"]+)"/i);
-            
-            if (iframeMatch && iframeMatch.length > 1) {
-                videoUrl = iframeMatch[1]; 
-            }
-
-            var sources = [];
-            if (videoUrl !== "") {
+        var resp = http.GET(pageUrl, {"User-Agent": UA});
+        var html = resp.body;
+        var iframeRegex = /<iframe[^>]+(?:src|data-src)="([^"]+)"[^>]*>/gi;
+        var match;
+        var seen = {};
+        while ((match = iframeRegex.exec(html)) !== null) {
+            var u = match[1].trim();
+            if (u && !seen[u]) {
+                seen[u] = true;
+                var name = "Servidor " + (sources.length + 1);
                 sources.push(new VideoUrlSource({
                     width: 1280,
                     height: 720,
                     container: "video/mp4",
                     codec: "avc1.4d401f",
-                    name: "Servidor Principal",
+                    name: name,
                     bitrate: 2000000,
                     duration: 0,
-                    url: videoUrl
+                    url: u
                 }));
             }
+        }
+        var m3u8Regex = /(?:https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi;
+        while ((match = m3u8Regex.exec(html)) !== null) {
+            var u = match[0];
+            if (!seen[u]) {
+                seen[u] = true;
+                sources.push(new VideoUrlSource({
+                    width: 1280,
+                    height: 720,
+                    container: "application/x-mpegURL",
+                    codec: "avc1.4d401f",
+                    name: "HLS " + (sources.length + 1),
+                    bitrate: 2000000,
+                    duration: 0,
+                    url: u
+                }));
+            }
+        }
+    } catch (e) {}
+    return sources;
+}
 
-            var doc = DOMParser.parseFromString(html);
-            var titleNode = doc.querySelector("h1");
-            var title = titleNode ? titleNode.textContent : "Película Scrapeada";
+function scrapePageDetails(pageUrl) {
+    var info = {title: "", thumbnail: "", description: ""};
+    try {
+        var resp = http.GET(pageUrl, {"User-Agent": UA});
+        var html = resp.body;
+        var doc = DOMParser.parseFromString(html);
+        var titleNode = doc.querySelector("h1");
+        info.title = titleNode ? titleNode.textContent.trim() : "";
+        var imgNode = doc.querySelector("img[src*='poster']") || doc.querySelector(".post img") || doc.querySelector("img[alt*='poster']");
+        if (imgNode) {
+            var src = imgNode.getAttribute("src") || "";
+            if (src && src.indexOf("http") === -1) src = "https://pelisplus2.ai" + src;
+            info.thumbnail = src;
+        }
+        var descNode = doc.querySelector(".description") || doc.querySelector("p粘Description");
+        info.description = descNode ? descNode.textContent.trim().substring(0, 500) : "";
+    } catch (e) {}
+    return info;
+}
 
-            initPlatformID();
-            return new PlatformVideoDetails({
-                id: new PlatformID("PlayPelis", url, PID),
-                name: title,
-                thumbnails: new Thumbnails([]),
-                author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app"),
-                uploadDate: 0,
-                url: url,
-                duration: 0,
-                viewCount: 0,
-                isLive: false,
-                description: "Reproduciendo desde fuente externa",
-                video: new MuxVideoSourceDescriptor({
-                    isUnMuxed: false,
-                    videoSources: sources
-                })
-            });
-        } catch (e) {}
+function findEsplayForTmdb(title, isTv) {
+    try {
+        var items = searchEsplay(title);
+        var wantedType = isTv ? "tvshow" : "movie";
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].type === wantedType) return items[i];
+        }
+        if (items.length > 0) return items[0];
+    } catch (e) {}
+    return null;
+}
+
+function doDetails(url) {
+    if (!url) return mkDetail("", "PlayPelis", "", "");
+
+    if (url.indexOf("themoviedb.org") !== -1) {
+        var mMovie = url.match(/\/movie\/(-?\d+)/);
+        var mTv = url.match(/\/tv\/(-?\d+)/);
+        var tmdbId = -1;
+        if (mMovie) tmdbId = parseInt(mMovie[1]);
+        if (mTv) tmdbId = parseInt(mTv[1]);
+
+        if (tmdbId > 0) {
+            var isTv = !!mTv;
+            var ep = isTv ? "/tv/" : "/movie/";
+            try {
+                var detail = tmdbGet(ep + tmdbId, {"language": "es"});
+                var name = detail.name || detail.title || "";
+                var thumb = detail.backdrop_path ? TMDB_BK + detail.backdrop_path : (detail.poster_path ? TMDB_IMG + detail.poster_path : "");
+                var overview = detail.overview || "";
+
+                var esItem = findEsplayForTmdb(name, isTv);
+                if (esItem) {
+                    var pelisUrl = "https://pelisplus2.ai/" + (isTv ? "serie" : "pelicula") + "/" + esItem.slug;
+                    var esplayCover = esItem.coverPath ? (ESPLAY_IMG + esItem.coverPath + "/cover/original") : "";
+                    var finalThumb = thumb || esplayCover;
+                    var pageDetails = scrapePageDetails(pelisUrl);
+                    var pageThumb = finalThumb || pageDetails.thumbnail;
+                    var sources = scrapeIframes(pelisUrl);
+                    return mkDetail(pelisUrl, name || pageDetails.title || esItem.title, pageThumb, pelisUrl, sources, overview || pageDetails.description);
+                }
+
+                return mkDetail(url, name || "PlayPelis", thumb, url, [], overview);
+            } catch (e) {
+                return mkDetail(url, "Error al cargar", "", url, [], "No se pudo obtener la información del video.");
+            }
+        }
     }
 
-    return mkDetail(url, "PlayPelis", "", url);
+    if (url.indexOf("pelisplus2.ai") !== -1) {
+        try {
+            var pageDetails = scrapePageDetails(url);
+            var sources = scrapeIframes(url);
+            var name = pageDetails.title || "PlayPelis";
+            var thumb = pageDetails.thumbnail || "";
+            var desc = pageDetails.description || "Reproduciendo desde PlayPelis";
+            return mkDetail(url, name, thumb, url, sources, desc);
+        } catch (e) {
+            return mkDetail(url, "Error al cargar", "", url, [], "No se pudo cargar la página.");
+        }
+    }
+
+    return mkDetail(url, "PlayPelis", "", url, [], "Contenido de PlayPelis");
 }
 
 source.setSettings = function(s) { _settings = s || {}; };
 source.enable = function(c, s) { _settings = s || {}; };
 source.getSearchCapabilities = function() { return { types: [Type.Feed.Mixed], sorts: [Type.Order.Chronological], filters: [] }; };
 source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
-source.isVideoDetailsUrl = function(url) { if (!url) return false; return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus2.ai/") !== -1; };
+source.isVideoDetailsUrl = function(url) {
+    if (!url) return false;
+    return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus2.ai/") !== -1;
+};
 source.getVideoDetails = function(url) { return doDetails(url); };
 source.getHome = function(continuationToken) { return doHome(); };
 source.isChannelUrl = function(url) { return false; };
