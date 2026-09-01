@@ -55,6 +55,25 @@ function mkDetail(id, name, thumb, url, videoUrls, description) {
     return null;
 }
 
+function esplaySearch(query) {
+    var items = [];
+    try {
+        var data = gqlPost(
+            'query mySearchItems($query: String!) { movies: showSearch(query: $query, type: "movie", limit: 15) { items { id title slug coverPath year overview type } } tvshows: showSearch(query: $query, type: "tvshow", limit: 15) { items { id title slug coverPath year overview type } } }',
+            {query: query}
+        );
+        log("esplaySearch raw response: " + JSON.stringify(data)); // <-- temporal
+        if (data && data.data) {
+            if (data.data.movies && data.data.movies.items) items = items.concat(data.data.movies.items);
+            if (data.data.tvshows && data.data.tvshows.items) items = items.concat(data.data.tvshows.items);
+        } else if (data && data.errors) {
+            log("esplaySearch GraphQL errors: " + JSON.stringify(data.errors)); // <-- temporal
+        }
+    } catch (e) {
+        log("esplaySearch exception: " + String(e)); // <-- temporal
+    }
+    return items;
+}
 // ========== PAGERS ==========
 class PlayPelisHomePager extends VideoPager {
     constructor(results, hasMore, context) {
