@@ -1,5 +1,4 @@
-// PlayPelis GrayJoy Source Plugin v3
-// API classes: PlatformVideoDetails, VideoSourceDescriptor, VideoUrlSource, HLSSource
+// PlayPelis GrayJoy Source Plugin v4
 var TMDB_API = "https://api.themoviedb.org/3";
 var TMDB_KEY = "26c168179ae6b5445f36aca260e00d48";
 var TMDB_IMG = "https://image.tmdb.org/t/p/w220_and_h330_face";
@@ -12,7 +11,6 @@ var PPID = null;
 var _settings = {};
 var GQL_ITEMS = "items { id title slug coverPath year overview type quality { type language } }";
 
-// Cache Type constants with fallbacks
 var _feedMixed = 2;
 var _orderChrono = 1;
 try { if (typeof Type !== "undefined") { _feedMixed = Type.Feed.Mixed; _orderChrono = Type.Order.Chronological; } } catch(e) {}
@@ -61,49 +59,30 @@ function mkVideo(id, title, thumb, url, date) {
 }
 
 function mkVideoSource(url, name, isHls) {
+    var container = isHls ? "application/x-mpegURL" : "video/mp4";
     try {
-        if (isHls || url.indexOf(".m3u8") !== -1) {
-            if (typeof HLSSource !== "undefined") {
-                return new HLSSource({ url: url, name: name, duration: 0 });
-            }
+        if (typeof HLSSource !== "undefined" && isHls) {
+            return new HLSSource({ url: url, name: name, duration: 0 });
+        }
+        if (typeof VideoUrlSource !== "undefined") {
             return new VideoUrlSource({
                 width: 1920, height: 1080,
-                container: "application/x-mpegURL",
+                container: container,
                 codec: "avc1.640028",
                 name: name, bitrate: 4000000, duration: 0, url: url
             });
         }
-        return new VideoUrlSource({
-            width: 1920, height: 1080,
-            container: "video/mp4",
-            codec: "avc1.640028",
-            name: name, bitrate: 4000000, duration: 0, url: url
-        });
-    } catch(e) {
-        // Fallback: create plain object with correct structure
-        return {
-            plugin_type: isHls || url.indexOf(".m3u8") !== -1 ? "HLSSource" : "VideoUrlSource",
-            width: 1920, height: 1080,
-            container: isHls || url.indexOf(".m3u8") !== -1 ? "application/x-mpegURL" : "video/mp4",
-            codec: "avc1.640028",
-            name: name, bitrate: 4000000, duration: 0, url: url
-        };
-    }
+    } catch(e) {}
+    return { plugin_type: "VideoUrlSource", width: 1920, height: 1080, container: container, codec: "avc1.640028", name: name, bitrate: 4000000, duration: 0, url: url };
 }
 
 function mkVideoDescriptor(videoSources) {
     try {
-        // GrayJoy API: class is VideoSourceDescriptor, plugin_type is "MuxVideoSourceDescriptor"
-        return new VideoSourceDescriptor(videoSources);
-    } catch(e) {
-        try {
-            // Fallback: some versions might use MuxVideoSourceDescriptor directly
-            return new MuxVideoSourceDescriptor({isUnMuxed: false, videoSources: videoSources});
-        } catch(e2) {
-            // Last resort: plain object
-            return { plugin_type: "MuxVideoSourceDescriptor", videoSources: videoSources };
+        if (typeof VideoSourceDescriptor !== "undefined") {
+            return new VideoSourceDescriptor(videoSources);
         }
-    }
+    } catch(e) {}
+    return { plugin_type: "MuxVideoSourceDescriptor", isUnMuxed: false, videoSources: videoSources };
 }
 
 function mkDetail(id, name, thumb, url, videoUrls, description) {
@@ -127,77 +106,66 @@ function mkDetail(id, name, thumb, url, videoUrls, description) {
             isLive: false,
             description: description || "Contenido de PlayPelis",
             video: videoDesc,
-            rating: { likes: 0, dislikes: 0 }
+            rating: new IRating(0, 0)
         });
-    } catch(e) {
-        // Fallback: use PlatformVideo if PlatformVideoDetails not available
-        var v = mkVideo(id, name, thumb, url, 0);
-        v.description = description || "";
-        v.video = videoDesc;
-        v.rating = { likes: 0, dislikes: 0 };
-        return v;
-    }
+    } catch(e) {}
+    try {
+        var obj = {
+            id: new PlatformID("PlayPelis", String(id), PID),
+            name: name || "PlayPelis",
+            thumbnails: mkThumb(thumb),
+            author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app"),
+            uploadDate: 0,
+            url: url, duration: 0, viewCount: 0, isLive: false,
+            description: description || "", video: videoDesc,
+            plugin_type: "PlatformVideoDetails"
+        };
+        return obj;
+    } catch(e2) {}
+    return null;
 }
 
 // ========== SEARCH ==========
 function searchEsplay(query) {
-    var q = "query mySearchItems($query: String!) { movies: showSearch(query: $query, type: \"movie\", limit: 20) { totalCount " + GQL_ITEMS + " } tvshows: showSearch(query: $query, type: \"tvshow\", limit: 20) { totalCount " + GQL_ITEMS + " } }";
-    var data = gqlPost(q, {"query": query});
-    if (!data || !data.data) return [];
-    var movies = (data.data.movies && data.data.movies.items) || [];
-    var tvshows = (data.data.tvshows && data.data.tvshows.items) || [];
-    return movies.concat(tvshows);
-}
-
-function esplayToVideos(items) {
-    var results = [];
-    for (var i = 0; i < items.length; i++) {
-        var it = items[i];
-        var isTv = it.type === "tvshow";
-        var cover = it.coverPath ? (ESPLAY_IMG + it.coverPath + "/cover/original") : "";
-        var url = "https://pelisplus2.ai/" + (isTv ? "serie" : "pelicula") + "/" + it.slug;
-        results.push(mkVideo(it.id, it.title, cover, url, it.year || 0));
-    }
-    return results;
-}
-
-function searchTmdb(query) {
-    var results = [];
+    var items = [];
     try {
-        var tv = tmdbGet("/search/tv", {"query": query, "language": "es", "include_adult": "false", "page": "1"});
-        if (tv && tv.results) {
-            for (var i = 0; i < tv.results.length; i++) {
-                var r = tv.results[i];
-                results.push(mkVideo("tmdb:" + r.id, r.name || r.original_name || "Sin titulo", r.poster_path ? TMDB_IMG + r.poster_path : "", "https://www.themoviedb.org/tv/" + r.id, r.first_air_date ? new Date(r.first_air_date).getTime() : 0));
-            }
+        var data = gqlPost("{ search(query: \"" + query.replace(/"/g, '\\"') + "\", page: 1, limit: 10) { " + GQL_ITEMS + " } }", {});
+        if (data && data.data && data.data.search) {
+            items = data.data.search.items || [];
         }
-    } catch (e) {}
-    try {
-        var mv = tmdbGet("/search/movie", {"query": query, "language": "es", "include_adult": "false", "page": "1"});
-        if (mv && mv.results) {
-            for (var i = 0; i < mv.results.length; i++) {
-                var r = mv.results[i];
-                results.push(mkVideo("tmdb:" + r.id, r.title || r.original_title || "Sin titulo", r.poster_path ? TMDB_IMG + r.poster_path : "", "https://www.themoviedb.org/movie/" + r.id, r.release_date ? new Date(r.release_date).getTime() : 0));
-            }
-        }
-    } catch (e) {}
-    return results;
+    } catch(e) {}
+    return items;
 }
 
 function doSearch(query) {
-    var mode = (_settings.searchSource || "2").toString();
     var results = [];
-    if (mode === "1" || mode === "3") {
+    var mode = "2";
+    try { mode = _settings.searchSource || "2"; } catch(e) {}
+    if (mode === "0" || mode === "2") {
         try {
-            var vids = esplayToVideos(searchEsplay(query));
-            for (var i = 0; i < vids.length; i++) results.push(vids[i]);
-        } catch (e) {}
+            var tmdbRes = tmdbGet("/search/multi", {"query": query, "language": "es"});
+            if (tmdbRes && tmdbRes.results) {
+                for (var i = 0; i < tmdbRes.results.length && i < 15; i++) {
+                    var r = tmdbRes.results[i];
+                    if (r.media_type === "movie") {
+                        results.push(mkVideo("tmdb:" + r.id, r.title || r.name || "Sin titulo", r.poster_path ? TMDB_IMG + r.poster_path : "", "https://www.themoviedb.org/movie/" + r.id, r.release_date ? new Date(r.release_date).getTime() : 0));
+                    } else if (r.media_type === "tv") {
+                        results.push(mkVideo("tmdb:" + r.id, r.name || "Sin titulo", r.poster_path ? TMDB_IMG + r.poster_path : "", "https://www.themoviedb.org/tv/" + r.id, r.first_air_date ? new Date(r.first_air_date).getTime() : 0));
+                    }
+                }
+            }
+        } catch(e) {}
     }
-    if (mode === "1" || mode === "2" || mode === "3") {
+    if (mode === "0" || mode === "3") {
         try {
-            var tmdbs = searchTmdb(query);
-            for (var i = 0; i < tmdbs.length; i++) results.push(tmdbs[i]);
-        } catch (e) {}
+            var esItems = searchEsplay(query);
+            for (var i = 0; i < esItems.length; i++) {
+                var ei = esItems[i];
+                var ep = ei.type === "tvshow" ? "serie" : "pelicula";
+                var imgUrl = ei.coverPath ? ESPLAY_IMG + ei.coverPath + "/cover/original" : "";
+                results.push(mkVideo("es:" + ei.id, ei.title + " (" + (ei.year || "") + ")", imgUrl, "https://pelisplus2.ai/" + ep + "/" + ei.slug, 0));
+            }
+        } catch(e) {}
     }
     return new VideoPager(results, false);
 }
@@ -213,7 +181,7 @@ function doHome() {
                 results.push(mkVideo("tmdb:" + r.id, r.title || r.original_title || "Sin titulo", r.poster_path ? TMDB_IMG + r.poster_path : "", "https://www.themoviedb.org/movie/" + r.id, r.release_date ? new Date(r.release_date).getTime() : 0));
             }
         }
-    } catch (e) {}
+    } catch(e) {}
     try {
         var tvTrend = tmdbGet("/trending/tv/week", {"language": "es"});
         if (tvTrend && tvTrend.results) {
@@ -222,7 +190,7 @@ function doHome() {
                 results.push(mkVideo("tmdb:" + r.id, r.name || r.original_name || "Sin titulo", r.poster_path ? TMDB_IMG + r.poster_path : "", "https://www.themoviedb.org/tv/" + r.id, r.first_air_date ? new Date(r.first_air_date).getTime() : 0));
             }
         }
-    } catch (e) {}
+    } catch(e) {}
     return new VideoPager(results, false);
 }
 
@@ -338,7 +306,7 @@ function scrapeVideoUrls(pageUrl) {
     var seen = {};
     try {
         var html = httpGet(pageUrl);
-        if (!html) return videoUrls;
+        if (!html || html.length < 100) return videoUrls;
         var m = findM3u8Urls(html);
         for (var i = 0; i < m.length; i++) { if (!seen[m[i]]) { seen[m[i]] = true; videoUrls.push(m[i]); } }
         var p = findMp4Urls(html);
@@ -409,7 +377,7 @@ function doDetails(url) {
                     var esplayCover = esItem.coverPath ? (ESPLAY_IMG + esItem.coverPath + "/cover/original") : "";
                     var sources = scrapeVideoUrls(pelisUrl);
                     if (sources.length === 0) {
-                        var altDomains = ["pelisplushd.nu", "pelisplushd.nz", "cuevana3.ai"];
+                        var altDomains = ["pelisplushd.nu", "pelisplushd.nz", "cuevana3.ai", "cuevana3.io", "cuevana3.so", "pelistop.co", "gnula.uno"];
                         for (var d = 0; d < altDomains.length && sources.length === 0; d++) {
                             var altUrl = "https://" + altDomains[d] + "/" + (isTv ? "serie" : "pelicula") + "/" + esItem.slug;
                             sources = scrapeVideoUrls(altUrl);
@@ -423,7 +391,7 @@ function doDetails(url) {
             }
         }
     }
-    if (url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1) {
+    if (url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1 || url.indexOf("gnula") !== -1 || url.indexOf("pelistop") !== -1) {
         try {
             var pd = scrapePageDetails(url);
             var sources = scrapeVideoUrls(url);
@@ -449,7 +417,7 @@ if (typeof source !== "undefined") {
     source.search = function(query, type, order, filters, continuationToken) { return doSearch(query); };
     source.isVideoDetailsUrl = function(url) {
         if (!url) return false;
-        return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1;
+        return url.indexOf("themoviedb.org/movie/") !== -1 || url.indexOf("themoviedb.org/tv/") !== -1 || url.indexOf("pelisplus") !== -1 || url.indexOf("cuevana") !== -1 || url.indexOf("pelisplushd") !== -1 || url.indexOf("gnula") !== -1 || url.indexOf("pelistop") !== -1;
     };
     source.getVideoDetails = function(url) { return doDetails(url); };
     source.getHome = function(continuationToken) { return doHome(); };
