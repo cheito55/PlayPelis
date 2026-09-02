@@ -222,23 +222,6 @@ function mkDetail(id, name, thumb, url, videoUrls, description) {
     } catch (e2) {}
     return { id: String(id), name: name || "PlayPelis", url: url, description: description || "", video: videoDesc, contentType: 1 };
 }
-new IRating(0, 0) → null (2 veces) — IRating no existe en GrayJay, causaba crash
-contentType: 1 agregado al objeto fallback de respaldo — GrayJoy lo necesita para reconocer que es un video
-Pasos:
-
-En GitHub, busca function mkDetail en tu PlayPelis.js
-Reemplaza desde esa línea hasta el } que cierra la función (busca la línea `// ===================== Resolvedores de players =====================` como referencia de dónde termina)
-Sube, bórrala en GrayJay y vuelve a agregarla
-El JSON no cambia, pero sube el JSON de versión 11 que ya lo tienes.
-
-
-Fork
-
-Copy
-
-Type a message... (@ for files)
-
-+
 
 // ===================== Resolvedores de players =====================
 function resolveDood(u) {
