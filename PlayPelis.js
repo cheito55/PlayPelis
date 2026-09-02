@@ -825,38 +825,25 @@ function doSearch(query) {
 }
 
 function doHome() {
-    var sections = [];
+    var videos = [];
     try {
         var jka = siteJkanimeHome(20);
-        var jkaItems = [];
         for (var i = 0; i < jka.length; i++) {
             var it = jka[i];
-            jkaItems.push(mkVideo("jka_" + it.url, it.title, it.thumb, it.url, _now, "JkAnime"));
-        }
-        if (jkaItems.length > 0) {
-            try {
-                sections.push(new PlatformContent({ name: "Anime - JkAnime", items: jkaItems, contentType: _feedMixed }));
-            } catch (e) {
-                sections.push({ plugin_type: "PlatformContent", name: "Anime - JkAnime", items: jkaItems, contentType: _feedMixed });
-            }
+            videos.push(mkVideo("jka_" + it.url, it.title, it.thumb, it.url, _now, "JkAnime"));
         }
     } catch (e) {}
     try {
         var sm = sitePeliSmartHome(20);
-        var smItems = [];
         for (var i = 0; i < sm.length; i++) {
             var it = sm[i];
-            smItems.push(mkVideo("sm_" + it.url, it.title, it.thumb, it.url, _now, "PeliSmart"));
-        }
-        if (smItems.length > 0) {
-            try {
-                sections.push(new PlatformContent({ name: "Peliculas y Series - PeliSmart", items: smItems, contentType: _feedMixed }));
-            } catch (e) {
-                sections.push({ plugin_type: "PlatformContent", name: "Peliculas y Series - PeliSmart", items: smItems, contentType: _feedMixed });
-            }
+            videos.push(mkVideo("sm_" + it.url, it.title, it.thumb, it.url, _now, "PeliSmart"));
         }
     } catch (e) {}
-    return sections;
+    try {
+        if (typeof ContentPager !== "undefined") return new ContentPager(videos, false, null);
+    } catch (e) {}
+    return videos;
 }
 
 function doDetails(url) {
@@ -930,11 +917,13 @@ if (typeof source !== "undefined") {
         } catch (e) {}
         return videos;
     };
-    source.isVideoDetailsUrl = function (url) {
+    source.isContentDetailsUrl = function (url) {
         if (!url) return false;
         if (url.indexOf("esplay|") === 0) return true;
         return isSiteHost(url);
     };
+    source.getContentDetails = function (url) { return doDetails(url); };
+    source.isVideoDetailsUrl = function (url) { return source.isContentDetailsUrl(url); };
     source.getVideoDetails = function (url) { return doDetails(url); };
     source.getHome = function (continuationToken) { return doHome(); };
     source.isChannelUrl = function (url) { return false; };
