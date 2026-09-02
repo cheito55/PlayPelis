@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v18
+// PlayPelis GrayJay Source v19
 // poseidonhd2.co + pelispop.mov + cuevana3l.biz + pelisplusnuevo.com + pelisflix1.fans
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -116,6 +116,61 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
     }
 }
 
+// ===================== Cyberlocker resolvers =====================
+function resolveCyberlocker(embedUrl) {
+    if (!embedUrl) return null;
+    var host = getHost(embedUrl);
+
+    // waaw.to / voe.sx: follow redirect, extract m3u8 from /e/ page
+    if (host.indexOf("waaw") !== -1 || host.indexOf("voe.sx") !== -1) {
+        try {
+            var html = httpGet(embedUrl, {"Referer": embedUrl});
+            if (!html) return null;
+            // waaw.to: watch_video.php redirects to /e/ page
+            var watchMatch = html.match(/self\.location\.replace\('([^']+)['"]/);
+            if (watchMatch) {
+                var root = getRoot(embedUrl);
+                var eUrl = root + watchMatch[1];
+                html = httpGet(eUrl, {"Referer": embedUrl});
+            }
+            // Extract m3u8 from the page
+            var m3u8 = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
+            if (m3u8) {
+                var url = m3u8[0].replace(/['"`,;]/g, "");
+                return mkVideoSource(url, "Waaw/Voe", true);
+            }
+        } catch (e) {}
+    }
+
+    // streamtape: extract video URL from the page
+    if (host.indexOf("streamtape") !== -1) {
+        try {
+            var html = httpGet(embedUrl, {"Referer": embedUrl});
+            if (!html) return null;
+            // StreamTape has: var link = '...get_video?...token=...'
+            var link = html.match(/var\s+link\s*=\s*['"]([^'"]+)['"]/);
+            if (link) {
+                var videoUrl = "https://streamtape.com" + link[1];
+                return mkVideoSource(videoUrl, "StreamTape", false);
+            }
+        } catch (e) {}
+    }
+
+    // doodstream: extract video URL
+    if (host.indexOf("dood") !== -1) {
+        try {
+            var html = httpGet(embedUrl, {"Referer": embedUrl});
+            if (!html) return null;
+            var token = html.match(/(?:video_url|video_url_text)\s*[:=]\s*['"]([^'"]+)['"]/);
+            if (token) {
+                return mkVideoSource(token[1], "DoodStream", false);
+            }
+        } catch (e) {}
+    }
+
+    return null;
+}
+
 // ===================== poseidonhd2.co =====================
 var PHD = "https://www.poseidonhd2.co";
 
@@ -137,14 +192,20 @@ function phdResolvePlayer(playerPhpUrl) {
         var urlMatch = html.match(/var\s+url\s*=\s*['"]([^'"]+)['"]/);
         if (urlMatch) {
             var cyberUrl = urlMatch[1];
-            var name = "Server";
-            if (cyberUrl.indexOf("streamwish") !== -1) name = "StreamWish";
-            else if (cyberUrl.indexOf("filelions") !== -1) name = "FileLions";
-            else if (cyberUrl.indexOf("streamtape") !== -1) name = "StreamTape";
-            else if (cyberUrl.indexOf("waaw") !== -1) name = "Waaw";
-            else if (cyberUrl.indexOf("dood") !== -1) name = "DoodStream";
-            else if (cyberUrl.indexOf("voe") !== -1) name = "Voe";
-            sources.push(mkVideoSource(cyberUrl, name, false));
+            var resolved = resolveCyberlocker(cyberUrl);
+            if (resolved) {
+                sources.push(resolved);
+            } else {
+                // Fallback: pass the embed URL directly
+                var name = "Server";
+                if (cyberUrl.indexOf("streamwish") !== -1) name = "StreamWish";
+                else if (cyberUrl.indexOf("filelions") !== -1) name = "FileLions";
+                else if (cyberUrl.indexOf("streamtape") !== -1) name = "StreamTape";
+                else if (cyberUrl.indexOf("waaw") !== -1) name = "Waaw";
+                else if (cyberUrl.indexOf("dood") !== -1) name = "DoodStream";
+                else if (cyberUrl.indexOf("voe") !== -1) name = "Voe";
+                sources.push(mkVideoSource(cyberUrl, name, false));
+            }
         }
     } catch (e) {}
     return sources;
@@ -228,13 +289,8 @@ function phdMovieDetails(url) {
                 vs = langSources[si];
                 if (vs && vs.result) {
                     var resolved = phdResolvePlayer(vs.result);
-                    if (resolved.length > 0) {
-                        var ri;
-                        for (ri = 0; ri < resolved.length; ri++) videoSources.push(resolved[ri]);
-                    } else {
-                        var la = langs[li].charAt(0).toUpperCase() + langs[li].slice(1);
-                        videoSources.push(mkVideoSource(vs.result, (vs.cyberlocker || "Server") + " [" + la + "] " + (vs.quality || "SD"), false));
-                    }
+                    var ri;
+                    for (ri = 0; ri < resolved.length; ri++) videoSources.push(resolved[ri]);
                 }
             }
         }
