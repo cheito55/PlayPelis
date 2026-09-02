@@ -1,10 +1,10 @@
-// PlayPelis GrayJay Source v14
+// PlayPelis GrayJay Source v14.1
 // poseidonhd2.co + JkAnime + SoloLatino.net
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 var PPID = null;
 var _settings = {};
-var _now = new Date().getTime();
+var _now = Math.floor(Date.now() / 1000);
 
 function initPlatformID() {
     if (!PPID) PPID = new PlatformID("PlayPelis", "PlayPelis", PID);
@@ -125,6 +125,7 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
         }
     }
 }
+
 // ===================== poseidonhd2.co =====================
 var PHD = "https://www.poseidonhd2.co";
 
@@ -213,9 +214,9 @@ function phdMovieDetails(url) {
     try {
         var html = httpGet(url);
         var nd = extractNextData(html);
-        if (!nd || !nd.props || !nd.props.pageProps) return null;
+        if (!nd || !nd.props || !nd.props.pageProps) return mkDetail("phd_movie_" + url, "Sin resultado", "", url, [], "No se encontro informacion");
         var movie = nd.props.pageProps.thisMovie;
-        if (!movie) return null;
+        if (!movie) return mkDetail("phd_movie_" + url, "Sin resultado", "", url, [], "No se encontro la pelicula");
 
         var title = (movie.titles && movie.titles.name) || "Sin titulo";
         var poster = (movie.images && movie.images.poster) || "";
@@ -251,16 +252,16 @@ function phdMovieDetails(url) {
         }
 
         return mkDetail("phd_movie_" + url, title, backdrop, url, videoSources, desc);
-    } catch (e) { return null; }
+    } catch (e) { return mkDetail("phd_err", "Error", "", url, [], "Error al cargar pelicula"); }
 }
 
 function phdSerieDetails(url) {
     try {
         var html = httpGet(url);
         var nd = extractNextData(html);
-        if (!nd || !nd.props || !nd.props.pageProps) return null;
+        if (!nd || !nd.props || !nd.props.pageProps) return mkDetail("phd_serie_" + url, "Sin resultado", "", url, [], "No se encontro informacion");
         var serie = nd.props.pageProps.thisSerie;
-        if (!serie) return null;
+        if (!serie) return mkDetail("phd_serie_" + url, "Sin resultado", "", url, [], "No se encontro informacion");
 
         var title = (serie.titles && serie.titles.name) || "Sin titulo";
         var poster = (serie.images && serie.images.poster) || "";
@@ -314,8 +315,9 @@ function phdSerieDetails(url) {
         }
 
         return mkDetail("phd_serie_" + url, title, poster, url, videoSources, desc);
-    } catch (e) { return null; }
+    } catch (e) { return mkDetail("phd_ser_err", "Error", "", url, [], "Error al cargar serie"); }
 }
+
 // ===================== JkAnime =====================
 var JK = "https://jkanime.net";
 
@@ -407,8 +409,9 @@ function jkaDetails(url) {
         }
 
         return mkDetail("jk_" + url, title || slugToTitle(episodeMatch ? episodeMatch[1] : "Anime"), thumb, url, sources, desc);
-    } catch (e) { return null; }
+    } catch (e) { return mkDetail("jk_err", "Error", "", url, [], "Error al cargar anime"); }
 }
+
 // ===================== SoloLatino.net =====================
 var SL = "https://sololatino.net";
 
@@ -440,7 +443,7 @@ function slSuggest(query) {
 function slDetails(url) {
     try {
         var html = httpGet(url, {"Referer": SL + "/"});
-        if (!html) return null;
+        if (!html) return mkDetail("sl_" + url, "Sin resultado", "", url, [], "No se pudo cargar la pagina");
 
         var title = "";
         var tm = html.match(/<title>([^<]+)<\/title>/i);
@@ -454,7 +457,6 @@ function slDetails(url) {
         tm = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
         if (tm) desc = htmlDecode(tm[1]);
 
-        var videoSources = [];
         var tokens = [];
         var tokenRe = /data-player-token="([^"]+)"/g;
         var m;
@@ -462,34 +464,40 @@ function slDetails(url) {
             tokens.push(m[1]);
         }
 
+        var videoSources = [];
         var i;
         for (i = 0; i < tokens.length; i++) {
-            videoSources.push(mkVideoSource(url, "Servidor " + (i + 1), false));
+            try {
+                var playerUrl = url;
+                videoSources.push(mkVideoSource(playerUrl, "Servidor " + (i + 1), false));
+            } catch (e2) {}
+        }
+
+        var lazyRe = /data-lazy-embed="([^"]+)"/g;
+        while ((m = lazyRe.exec(html)) && videoSources.length < 5) {
         }
 
         return mkDetail("sl_" + url, title, poster, url, videoSources, desc);
-    } catch (e) { return null; }
+    } catch (e) { return mkDetail("sl_err", "Error", "", url, [], "Error al cargar contenido"); }
 }
 
-// ===================== Búsqueda unificada =====================
+// ===================== Busqueda unificada =====================
 function doSearch(query) {
     var results = [];
     var i;
 
-    // SoloLatino
     try {
         var slResults = slSuggest(query);
         for (i = 0; i < slResults.length; i++) results.push(slResults[i]);
     } catch (e) {}
 
-    // poseidonhd2.co
     try {
         var phdResults = phdSearch(query);
         for (i = 0; i < phdResults.length; i++) results.push(phdResults[i]);
     } catch (e) {}
 
-    // JkAnime
     try {
+        var slug = query.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
         var jkSearch = httpGet(JK + "/?s=" + encodeURIComponent(query), {"Referer": JK + "/"});
         if (jkSearch) {
             var re = /<a[^>]*href="(https?:\/\/jkanime\.net\/[a-z0-9-]+\/?)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*>[\s\S]*?<h2[^>]*>([\s\S]*?)<\/h2>/gi;
@@ -508,7 +516,7 @@ function doSearch(query) {
 
 // ===================== Detalles unificados =====================
 function doDetails(url) {
-    if (!url) return null;
+    if (!url) return mkDetail("", "Sin url", "", url, [], "");
     var host = getHost(url);
 
     if (host.indexOf("poseidonhd2.co") !== -1) {
@@ -528,7 +536,7 @@ function doDetails(url) {
         return slDetails(url);
     }
 
-    return null;
+    return mkDetail("", "Fuente no soportada", "", url, [], "Esta URL no es compatible");
 }
 
 // ===================== Home =====================
@@ -536,13 +544,11 @@ function doHome() {
     var videos = [];
     var i;
 
-    // poseidonhd2.co movies
     try {
         var phdVideos = phdHome();
         for (i = 0; i < phdVideos.length; i++) videos.push(phdVideos[i]);
     } catch (e) {}
 
-    // JkAnime featured
     try {
         var jkHtml = httpGet(JK + "/", {"Referer": JK + "/"});
         if (jkHtml) {
