@@ -121,17 +121,21 @@ function resolveCyberlocker(embedUrl) {
     if (!embedUrl) return null;
     var host = getHost(embedUrl);
 
-    // waaw.to / voe.sx: follow redirect, extract m3u8 from /e/ page
+    // waaw.to / voe.sx: follow redirect chain, extract m3u8 from /e/ page
     if (host.indexOf("waaw") !== -1 || host.indexOf("voe.sx") !== -1) {
         try {
             var html = httpGet(embedUrl, {"Referer": embedUrl});
             if (!html) return null;
-            // waaw.to: watch_video.php redirects to /e/ page
-            var watchMatch = html.match(/self\.location\.replace\('([^']+)['"]/);
-            if (watchMatch) {
-                var root = getRoot(embedUrl);
-                var eUrl = root + watchMatch[1];
-                html = httpGet(eUrl, {"Referer": embedUrl});
+            var root = getRoot(embedUrl);
+            // Follow self.location.replace chain (up to 3 redirects)
+            var maxRedirects = 3;
+            var ri;
+            for (ri = 0; ri < maxRedirects; ri++) {
+                var locMatch = html.match(/self\.location\.replace\(['"](\/[^'"]+)['"]/);
+                if (!locMatch) break;
+                var nextUrl = root + locMatch[1];
+                html = httpGet(nextUrl, {"Referer": embedUrl});
+                if (!html) break;
             }
             // Extract m3u8 from the page
             var m3u8 = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
@@ -408,7 +412,7 @@ function popDetails(url) {
     }
 }
 
-// ===================== cuevana3l.biz =====================
+// ===================== cuevana3l.biz (SPA - no scrapear) =====================
 var C3 = "https://cuevana3l.biz";
 
 function c3Search(query) {
@@ -464,8 +468,19 @@ function ppnSearch(query) {
         var m;
         while ((m = re.exec(html)) && videos.length < 30) {
             var title = stripTags(m[2]);
-            var link = fullUrl(PPN, m[1]);
-            if (title && title !== "Sin titulo") videos.push(mkVideo("ppn_" + link, title, "", link, "PelisPlusNuevo"));
+            var link = m[1];
+            // Skip invalid links
+            if (!link || link === "/" || link === "#") continue;
+            link = fullUrl(PPN, link);
+            // Get thumbnail
+            var thumb = "";
+            var context = html.substring(m.index, Math.min(html.length, m.index + m[0].length + 300));
+            var imgMatch = context.match(/data-src="([^"]*tmdb[^"]*)"/);
+            if (!imgMatch) imgMatch = context.match(/src="([^"]*tmdb[^"]*)"/);
+            if (imgMatch) thumb = imgMatch[1];
+            if (title && title !== "Sin titulo" && link.indexOf("pelisplusnuevo.com/") !== -1) {
+                videos.push(mkVideo("ppn_" + link, title, thumb, link, "PelisPlusNuevo"));
+            }
         }
     } catch (e) {}
     return videos;
