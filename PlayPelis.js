@@ -1,6 +1,4 @@
-// PlayPelis GrayJay Source v10 - Scraper multi-sitio
-// Busca en 9 sitios (jkanime, PeliSmart, gnula, cuevana2, Pelisplushd,
-// pelisplus2, 0123movie, bflix, new-movies123) y resuelve los players.
+// PlayPelis GrayJay Source v11 - Scraper multi-sitio corregido
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 var PPID = null;
@@ -282,15 +280,6 @@ function resolveVoe(u) {
     } catch (e) { return null; }
 }
 
-function parseJsonData(body) {
-    try {
-        var start = body.indexOf("{");
-        var end = body.lastIndexOf("}");
-        if (start > -1 && end > start) return JSON.parse(body.substring(start, end + 1));
-    } catch (e) {}
-    return null;
-}
-
 function resolveStreamSB(u) {
     try {
         var m = String(u).match(/(?:embed-)?([A-Za-z0-9]+)(?:\.html)?(?:\?.*)?$/);
@@ -361,10 +350,10 @@ function collectEpisodes(html, baseUrl) {
         var href = m[1];
         var label = stripTags(m[2]);
         if (!href) continue;
-        var isEp = /\/capitulo\//i.test(href) || /\/episodio/i.test(href) || /\/episode\//i.test(href) || /-season-/i.test(href) || /\/ep\//i.test(href) || /\/ver\//i.test(href) || /\/temporada\//i.test(href);
+        var isEp = /\/capitulo\//i.test(href) || /\/episodio/i.test(href) || /\/episode\//i.test(href) || /-season-/i.test(href) || /\/ep\//i.test(href) || /\/ver\//i.test(href) || /\/temporada\//i.test(href) || /episodios/i.test(href);
         if (isEp) {
             var full = fullUrl(baseUrl, href);
-            if (out.indexOf(full) === -1) out.push(full);
+            if (out.indexOf(full) === -1) out.push({ url: full, name: label || full });
         }
     }
     return out;
@@ -419,20 +408,24 @@ function buildSourcesFromPage(html, url, maxSources) {
     return sources;
 }
 
-function resolveEpisodeLinks(epLinks, maxSources, maxPages) {
+function resolveEpisodeLinks(epList, maxSources, maxPages) {
     var sources = [];
     var seenPages = 0;
-    for (var i = 0; i < epLinks.length && sources.length < maxSources && seenPages < maxPages; i++) {
-        var html = httpGet(epLinks[i], { "Referer": getRoot(epLinks[i]) });
+    for (var i = 0; i < epList.length && sources.length < maxSources && seenPages < maxPages; i++) {
+        var epUrl = typeof epList[i] === "string" ? epList[i] : epList[i].url;
+        var epName = typeof epList[i] === "string" ? "Ep" : epList[i].name;
+        var html = httpGet(epUrl, { "Referer": getRoot(epUrl) });
         if (!html) continue;
         seenPages++;
-        var found = buildSourcesFromPage(html, epLinks[i], maxSources - sources.length);
+        var found = buildSourcesFromPage(html, epUrl, maxSources - sources.length);
         for (var j = 0; j < found.length; j++) {
             var ok = true;
             for (var k = 0; k < sources.length; k++) {
                 if (sources[k].url === found[j].url) { ok = false; break; }
             }
-            if (ok) sources.push(found[j]);
+            if (ok) {
+                sources.push({ url: found[j].url, name: epName + " - " + found[j].name, hls: found[j].hls });
+            }
         }
     }
     return sortSources(sources);
@@ -509,42 +502,12 @@ function jkaAjaxEpisodes(seriesHtml, slug) {
             if (!json || !json.data || json.data.length === 0) break;
             for (var i = 0; i < json.data.length; i++) {
                 var num = json.data[i].number;
-                out.push({ number: num, url: "https://jkanime.net/" + slug + "/" + num + "/" });
+                out.push({ number: num, name: "Cap " + num, url: "https://jkanime.net/" + slug + "/" + num + "/" });
             }
             if (out.length >= 90) break;
         }
     } catch (e) {}
     return out;
-}
-
-function jkaResolveSeriesSources(seriesHtml, slug, maxSources) {
-    var sources = [];
-    var epList = jkaAjaxEpisodes(seriesHtml, slug);
-    if (epList.length === 0) {
-        epList = [{ number: 1, url: "https://jkanime.net/" + slug + "/1/" }, { number: 2, url: "https://jkanime.net/" + slug + "/2/" }];
-    }
-    var pages = 0;
-    for (var i = 0; i < epList.length && sources.length < maxSources && pages < 3; i++) {
-        var html2 = httpGet(epList[i].url, { "Referer": "https://jkanime.net/" + slug + "/" });
-        if (!html2) continue;
-        pages++;
-        var found = jkaEpSources(html2, epList[i].number, maxSources - sources.length);
-        for (var j = 0; j < found.length; j++) {
-            var ok = true;
-            for (var k = 0; k < sources.length; k++) {
-                if (sources[k].url === found[j].url) { ok = false; break; }
-            }
-            if (ok) sources.push(found[j]);
-        }
-    }
-    return sortSources(sources);
-}
-
-function heroLinkFor(html, idx, limitChars) {
-    var window = html.substring(idx, idx + limitChars);
-    var am = window.match(/<a[^>]*href="([^"]+)"[^>]*>/i);
-    if (am) return fullUrl("https://jkanime.net/", am[1]);
-    return "";
 }
 
 function siteJkanimeHome(limit) {
@@ -614,9 +577,12 @@ function siteJkanimeDetails(url) {
     if (seriesMatch) {
         var slug = seriesMatch[1];
         var epList = jkaAjaxEpisodes(html, slug);
-        var totalCaps = epList.length > 0 ? epList.length : "?";
-        desc = (desc ? desc + " " : "") + "Serie " + slug.replace(/-/g, " ") + " - " + totalCaps + " capitulos. Reproduciendo los primeros capitulos disponibles.";
-        sources = jkaResolveSeriesSources(html, slug, 8);
+        if (epList.length > 0) {
+            desc = (desc ? desc + " " : "") + "Serie " + slug.replace(/-/g, " ") + " - " + epList.length + " capitulos disponibles.";
+            sources = resolveEpisodeLinks(epList, 12, 3);
+        } else {
+            sources = buildSourcesFromPage(html, url, 6);
+        }
         var title2 = meta.title || slug.replace(/-/g, " ");
         return { title: title2, thumb: thumb, sources: sources, description: desc };
     }
@@ -637,7 +603,7 @@ function collectSmartItems(html, baseUrl, limit) {
         var href = m[1];
         if (href.indexOf("/pelicula/") === -1 && href.indexOf("/serie/") === -1 && href.indexOf("/anime/") === -1) continue;
         var full = fullUrl(baseUrl, href);
-        var imgm = m[2].match(/<img[^>]*src="([^"]+)"[^>]*alt="([^"]*)"/);
+        var imgm = m[2].match(/<img[^>]*src="([^"]+)"[^>]*alt="([^"]*)"/) || m[2].match(/<img[^>]*data-src="([^"]+)"[^>]*alt="([^"]*)"/);
         if (!imgm) continue;
         var title = htmlDecode(imgm[2]);
         if (!title) {
@@ -645,7 +611,7 @@ function collectSmartItems(html, baseUrl, limit) {
             if (tm2) title = stripTags(tm2[1]);
         }
         var type = href.indexOf("/anime/") !== -1 ? "anime" : (href.indexOf("/serie/") !== -1 ? "serie" : "pelicula");
-        out.push({ title: title, url: full, thumb: imgm[1], type: type, site: "PeliSmart" });
+        out.push({ title: title || "Sin titulo", url: full, thumb: imgm[1], type: type, site: "PeliSmart" });
     }
     return out;
 }
@@ -677,10 +643,8 @@ function sitePeliSmartDetails(url) {
     var episodes = collectEpisodes(html, url);
     var desc = meta.desc || "";
     if (url.indexOf("/capitulo/") === -1 && episodes.length > 0) {
-        desc = (desc ? desc + " " : "") + "Serie - " + episodes.length + " capitulos.";
-        if (sources.length === 0) {
-            sources = resolveEpisodeLinks(episodes, 8, 3);
-        }
+        desc = (desc ? desc + " " : "") + "Serie - " + episodes.length + " capitulos encontrados.";
+        sources = resolveEpisodeLinks(episodes, 12, 3);
     }
     return { title: meta.title || "PeliSmart", thumb: meta.thumb, sources: sources, description: desc };
 }
@@ -729,26 +693,20 @@ function collectGenericImgItems(html, baseUrl, limit) {
     return out;
 }
 
-function siteGenericSearch(name, baseUrls, query, limit, onlyQuery) {
+function siteGenericSearch(name, baseUrls, query, limit) {
     var out = [];
     var slug = slugify(query);
     for (var b = 0; b < baseUrls.length && out.length < limit; b++) {
         try {
             var base = baseUrls[b];
-            var candidates;
-            if (onlyQuery) {
-                candidates = [base + "/?s=" + encodeURIComponent(query)];
-            } else {
-                candidates = [
-                    base + "/?s=" + encodeURIComponent(query),
-                    base + "/buscar?q=" + encodeURIComponent(query),
-                    base + "/search/" + slug + ".html",
-                    base + "/" + slug + "/page/1/"
-                ];
-            }
+            var candidates = [
+                base + "/?s=" + encodeURIComponent(query),
+                base + "/search/" + encodeURIComponent(query),
+                base + "/search.html?keyword=" + encodeURIComponent(query)
+            ];
             for (var c = 0; c < candidates.length && out.length < limit; c++) {
                 var html = httpGet(candidates[c], { "Referer": base + "/" });
-                if (!html || html.length < 500) continue;
+                if (!html || html.length < 300) continue;
                 var items = collectWordPressTPost(html, base, limit - out.length);
                 if (items.length === 0) items = collectGenericImgItems(html, base, limit - out.length);
                 for (var i = 0; i < items.length; i++) {
@@ -769,7 +727,7 @@ function siteGenericDetails(url) {
     var desc = meta.desc || "";
     if (url.indexOf("/capitulo/") === -1 && episodes.length > 0) {
         desc = (desc ? desc + " " : "") + "Serie - " + episodes.length + " capitulos.";
-        if (sources.length === 0) sources = resolveEpisodeLinks(episodes, 8, 3);
+        sources = resolveEpisodeLinks(episodes, 12, 3);
     }
     return { title: meta.title, thumb: meta.thumb, sources: sources, description: desc };
 }
@@ -790,13 +748,13 @@ function doSearch(query) {
             { name: "PeliSmart", run: function (q, lim) { return sitePeliSmartSearch(q, lim); } }
         ];
         var tier2 = [
-            { name: "Gnula", run: function (q, lim) { return siteGenericSearch("Gnula", ["https://gnula.uno"], q, lim, true); } },
-            { name: "Cuevana2", run: function (q, lim) { return siteGenericSearch("Cuevana2", ["https://cuevana2.biz"], q, lim, true); } },
-            { name: "Pelisplushd", run: function (q, lim) { return siteGenericSearch("Pelisplushd", ["https://pelisplushd.nz", "https://pelisplushd.nu", "https://pelisplushd.net"], q, lim, true); } },
-            { name: "Pelisplus2", run: function (q, lim) { return siteGenericSearch("Pelisplus2", ["https://pelisplus2.ai"], q, lim, true); } },
-            { name: "0123movie", run: function (q, lim) { return siteGenericSearch("0123movie", ["https://0123movie.net"], q, lim, true); } },
-            { name: "Bflix", run: function (q, lim) { return siteGenericSearch("Bflix", ["https://bflix.gg"], q, lim, true); } },
-            { name: "NewMovies123", run: function (q, lim) { return siteGenericSearch("NewMovies123", ["https://new-movies123.link"], q, lim, true); } }
+            { name: "Gnula", run: function (q, lim) { return siteGenericSearch("Gnula", ["https://gnula.uno"], q, lim); } },
+            { name: "Cuevana2", run: function (q, lim) { return siteGenericSearch("Cuevana2", ["https://cuevana2.biz"], q, lim); } },
+            { name: "Pelisplushd", run: function (q, lim) { return siteGenericSearch("Pelisplushd", ["https://pelisplushd.nz", "https://pelisplushd.nu", "https://pelisplushd.net"], q, lim); } },
+            { name: "Pelisplus2", run: function (q, lim) { return siteGenericSearch("Pelisplus2", ["https://pelisplus2.ai"], q, lim); } },
+            { name: "0123movie", run: function (q, lim) { return siteGenericSearch("0123movie", ["https://0123movie.net"], q, lim); } },
+            { name: "Bflix", run: function (q, lim) { return siteGenericSearch("Bflix", ["https://bflix.gg"], q, lim); } },
+            { name: "NewMovies123", run: function (q, lim) { return siteGenericSearch("NewMovies123", ["https://new-movies123.link"], q, lim); } }
         ];
         var perSite = Math.max(2, Math.floor(_searchLimit / tier1.length));
         for (var s = 0; s < tier1.length && out.length < _searchLimit; s++) {
@@ -805,13 +763,11 @@ function doSearch(query) {
                 for (var i = 0; i < items.length && out.length < _searchLimit; i++) out.push(items[i]);
             } catch (e) {}
         }
-        if (out.length < 4) {
-            for (var s2 = 0; s2 < tier2.length && out.length < _searchLimit; s2++) {
-                try {
-                    var items2 = tier2[s2].run(query, 4);
-                    for (var i2 = 0; i2 < items2.length && out.length < _searchLimit; i2++) out.push(items2[i2]);
-                } catch (e) {}
-            }
+        for (var s2 = 0; s2 < tier2.length && out.length < _searchLimit; s2++) {
+            try {
+                var items2 = tier2[s2].run(query, 6);
+                for (var i2 = 0; i2 < items2.length && out.length < _searchLimit; i2++) out.push(items2[i2]);
+            } catch (e) {}
         }
     } catch (e) {}
     var dedup = {};
