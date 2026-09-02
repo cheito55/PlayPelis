@@ -222,7 +222,6 @@ function mkDetail(id, name, thumb, url, videoUrls, description) {
     } catch (e2) {}
     return { id: String(id), name: name || "PlayPelis", url: url, description: description || "", video: videoDesc, contentType: 1 };
 }
-
 new IRating(0, 0) → null (2 veces) — IRating no existe en GrayJay, causaba crash
 contentType: 1 agregado al objeto fallback de respaldo — GrayJoy lo necesita para reconocer que es un video
 Pasos:
