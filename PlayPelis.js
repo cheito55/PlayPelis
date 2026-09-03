@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v34 - Extractor Estructurado Avanzado
+// PlayPelis GrayJay Source v35 - Estable y Robusto
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -121,9 +121,6 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
     });
 }
 
-// =========================================================
-// EXTRACTOR EN CASCADA (Vidhide, Do7go, Voe, etc.)
-// =========================================================
 function tryExtractM3u8(pageUrl) {
     addDebug("Intentando extraer: " + pageUrl);
     var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
@@ -134,23 +131,19 @@ function tryExtractM3u8(pageUrl) {
 
     var host = getHost(pageUrl);
 
-    // CASO 1: Vidhide / Do7go / Playmogo (DoodStream clones)
     if (host.indexOf("vidhide") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("playmogo") !== -1 || host.indexOf("callistanise") !== -1) {
-        // Buscar enlaces .m3u8 o .mp4 directos ocultos en el código
         var directMatch = html.match(/https?:\/\/[^"'\s<>]+\.(m3u8|mp4)[^"'\s<>]*/i);
         if (directMatch) {
             addDebug("Encontrado enlace directo en Vidhide/Do7go.");
             return directMatch[0];
         }
 
-        // Buscar dentro de bloques eval / packed o scripts internos de reproductor
         var scriptMatch = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/);
         if (scriptMatch && scriptMatch[1]) {
             return scriptMatch[1];
         }
     }
 
-    // CASO 2: Voe
     if (host.indexOf("voe") !== -1) {
         var m = html.match(/hls\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
         if (m && m[1]) return m[1];
@@ -165,7 +158,6 @@ function tryExtractM3u8(pageUrl) {
         }
     }
 
-    // CASO 3: Patrones genéricos de respaldo
     var pats = [
         /file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
         /sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/,
@@ -204,6 +196,23 @@ function ppHome() {
     return videos;
 }
 
+function ppSearch(query) {
+    var videos = [];
+    var q = String(query || "").toLowerCase();
+    try {
+        var data = ppGet("/movies/resume");
+        if (!data || !data.movies) return videos;
+        for (var i = 0; i < data.movies.length && videos.length < 30; i++) {
+            var m = data.movies[i];
+            var name = String(m.b || "").toLowerCase();
+            if (name.indexOf(q) !== -1) {
+                videos.push(mkVideo("pp_m_" + m.a, (m.l ? "[" + m.l + "] " : "") + m.b, fixImg(m.d) || fixImg(m.c) || "", "pp://movie/" + m.a, "PlayPelis"));
+            }
+        }
+    } catch (e) {}
+    return videos;
+}
+
 function ppMovieDetails(id) {
     _debugLog = ""; 
     var data = ppGet("/movies/" + id);
@@ -237,7 +246,7 @@ function jkaSearch(query) {
         var html = httpGet(JK + "/buscar/" + slug + "/", { "Referer": JK + "/" });
         if (!html) return out;
 
-        var re = /<div class="anime__item">\s*<a\s+href="(https?:\/\/jkanime\.net\/[a-z0-9-+\/]+)"[^>]*>[\s\S]*?<div[^>]*data-setbg="([^"]*)"[\s\S]*?<h5><a[^>]*>([^<]+)<\/a><\/h5>/gi;
+        var re = /<div class="anime__item">\s*<a\s+href="(https?:\/\/jkanime\.net\/[a-z0-9-]+\/)"[^>]*>[\s\S]*?<div[^>]*data-setbg="([^"]*)"[\s\S]*?<h5><a[^>]*>([^<]+)<\/a><\/h5>/gi;
         var m;
         while ((m = re.exec(html)) && out.length < 30) out.push({ title: htmlDecode(m[3]), url: m[1], thumb: m[2] });
     } catch (e) {}
@@ -310,6 +319,21 @@ function jkaExtractVideo(episodeUrl) {
     return null;
 }
 
+function doSearch(query) {
+    var results = [];
+    try { 
+        var r = ppSearch(query); 
+        for (var i = 0; i < r.length; i++) results.push(r[i]); 
+    } catch (e) {}
+    try {
+        var jka = jkaSearch(query);
+        for (var j = 0; j < jka.length; j++) {
+            results.push(mkVideo("jk_" + jka[j].url, "[Anime] " + jka[j].title, jka[j].thumb, jka[j].url, "JkAnime"));
+        }
+    } catch (e) {}
+    return results;
+}
+
 function doDetails(url) {
     if (!url) return mkDetail("", "", "", "", [], "URL vacía");
     if (url.indexOf("jkanime.net") !== -1) return jkaDetails(url);
@@ -322,7 +346,10 @@ function doDetails(url) {
 
 function doHome() {
     var videos = [];
-    try { var r = ppHome(); for (var i = 0; i < r.length; i++) videos.push(r[i]); } catch (e) {}
+    try { 
+        var r = ppHome(); 
+        for (var i = 0; i < r.length; i++) videos.push(r[i]); 
+    } catch (e) {}
     try {
         var jkHtml = httpGet(JK + "/", { "Referer": JK + "/" });
         if (jkHtml) {
@@ -343,10 +370,23 @@ if (typeof source !== "undefined") {
     source.setSettings = function(s) { _settings = s || {}; };
     source.enable = function(c, s) { _settings = s || {}; };
     source.getSearchCapabilities = function() { return { types: [2], sorts: [], filters: [] }; };
-    source.search = function(query) { return new VideoPager(doSearch(query || ""), false, null); };
-    source.isContentDetailsUrl = function(url) { return url && (url.indexOf("jkanime.net") !== -1 || url.indexOf("pp://") !== -1); };
-    source.getVideoDetails = function(url) { return source.getContentDetails(url); };
-    source.getHome = function() { return new VideoPager(doHome(), false, null); };
+    
+    source.search = function(query) { 
+        return new VideoPager(doSearch(query || ""), false, null); 
+    };
+    
+    source.isContentDetailsUrl = function(url) { 
+        return url && (url.indexOf("jkanime.net") !== -1 || url.indexOf("pp://") !== -1); 
+    };
+    
+    source.getVideoDetails = function(url) { 
+        return source.getContentDetails(url); 
+    };
+    
+    source.getHome = function() { 
+        return new VideoPager(doHome(), false, null); 
+    };
+    
     source.isChannelUrl = function(url) { return false; };
     source.searchSuggestions = function(query) { return []; };
 
