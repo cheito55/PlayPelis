@@ -3,7 +3,7 @@
     "description": "Extractor unificado para PlayPelis y JkAnime",
     "author": "PlayPelis",
     "authorUrl": "https://playpelis.app",
-    "sourceUrl": "http://127.0.0.1:3000/PlayPelisConfig.json",
+    "sourceUrl": "http://192.168.1.15:3000/PlayPelisConfig.json",
     "repositoryUrl": "",
     "scriptUrl": "PlayPelis.js",
     "iconUrl": "https://image.tmdb.org/t/p/w500/wwemzKWzjKYJFfCeiB57q3r4Bcm.png",
