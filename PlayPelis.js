@@ -49,12 +49,16 @@ function getHost(url) {
 // Reemplaza dominio → busca .split('|') → decodifica URLs
 // =========================================================
 function vidhideExtract(pageUrl) {
+function vidhideExtract(pageUrl) {
     try {
         var fetchUrl = pageUrl;
         if (fetchUrl.indexOf("vidhidefast.com") !== -1) fetchUrl = fetchUrl.replace("vidhidefast.com", "callistanise.com");
         if (fetchUrl.indexOf("vidhide.com") !== -1 && fetchUrl.indexOf("callistanise") === -1) fetchUrl = fetchUrl.replace("vidhide.com", "callistanise.com");
 
-        var html = httpGet(fetchUrl, { "User-Agent": UA });
+        var embedHost = getHost(fetchUrl);
+        var refererBase = "https://" + embedHost + "/";
+
+        var html = httpGet(fetchUrl, { "User-Agent": UA, "Referer": refererBase });
         if (!html || html.length < 500) return null;
 
         var splitIdx = html.lastIndexOf(".split('|')");
@@ -85,7 +89,7 @@ function vidhideExtract(pageUrl) {
 
         if (!best) return null;
 
-        var test = httpGet(best, { "User-Agent": UA });
+        var test = httpGet(best, { "User-Agent": UA, "Referer": refererBase });
         if (test && test.indexOf("#EXTM3U") !== -1) return best;
         return null;
     } catch (e) { return null; }
