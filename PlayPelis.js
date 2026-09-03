@@ -59,7 +59,16 @@ function getHost(url) {
 function vidhideExtract(pageUrl, referer) {
     var ref = referer || pageUrl;
     try {
-        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": ref, "Origin": "https://" + getHost(pageUrl) });
+        // VidHideFast redirige a callistanise.com (301)
+        // GrayJay no sigue redirects, así que reemplazamos el dominio
+        var fetchUrl = pageUrl;
+        if (fetchUrl.indexOf("vidhidefast.com") !== -1) {
+            fetchUrl = fetchUrl.replace("vidhidefast.com", "callistanise.com");
+        }
+        if (fetchUrl.indexOf("vidhide.com") !== -1) {
+            fetchUrl = fetchUrl.replace("vidhide.com", "callistanise.com");
+        }
+        var html = httpGet(fetchUrl, { "User-Agent": UA, "Referer": ref, "Origin": "https://" + getHost(fetchUrl) });
         if (!html || html.length < 500) return null;
 
         // 1. Extraer el key array del packed code
