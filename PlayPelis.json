@@ -1,6 +1,6 @@
 {
     "name": "PlayPelis",
-    "description": "Peliculas, series y anime en español. PlayerPro + JkAnime.",
+    "description": "Peliculas, series y anime en español. PlayerPro + JkAnime + Extractores.",
     "author": "cheito55",
     "authorUrl": "https://github.com/cheito55",
     "platformUrl": "https://playpelis.app",
@@ -16,6 +16,12 @@
         "plpro.org",
         "jkanime.net",
         "image.tmdb.org",
-        "playpelis.app"
+        "playpelis.app",
+        "voe.sx",
+        "vidhidefast.com",
+        "hlsflex.com",
+        "do7go.com",
+        "streamwish.to",
+        "doodstream.com"
     ]
 }
