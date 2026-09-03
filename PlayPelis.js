@@ -1,80 +1,60 @@
-// PlayPelis GrayJay Source v25
-// PlayerPro API (catálogo) + JkAnime (video m3u8)
+// PlayPelis GrayJay Source v26
+// PlayerPro API (catálogo) + JkAnime (video m3u8) - Portadas corregidas
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 var PPID = null;
 var _settings = {};
 var _now = Math.floor(Date.now() / 1000);
-
 var IPTV_URL = "https://plpro.org";
 var IPTV_USER = "p";
 var IPTV_PASS = "p";
 var JK = "https://jkanime.net";
+var TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
 function initPlatformID() { if (!PPID) PPID = new PlatformID("PlayPelis", "PlayPelis", PID); }
 
 function httpGet(url, headers) {
-    try {
-        var h = headers || {};
-        if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = UA;
-        return (http.GET(url, h).body || "");
-    } catch (e) { return ""; }
+    try { var h = headers || {}; if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = UA; return (http.GET(url, h).body || ""); }
+    catch (e) { return ""; }
 }
-
 function httpPost(url, body, headers) {
-    try {
-        var h = headers || {};
-        if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = UA;
-        return (http.POST(url, body, h).body || "");
-    } catch (e) { return ""; }
+    try { var h = headers || {}; if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = UA; return (http.POST(url, body, h).body || ""); }
+    catch (e) { return ""; }
 }
-
 function htmlDecode(s) {
     if (!s) return "";
     return String(s).replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&#(\d+);/g,function(m,d){return String.fromCharCode(parseInt(d,10));}).replace(/&#x([0-9a-fA-F]+);/g,function(m,x){return String.fromCharCode(parseInt(x,16));});
 }
-
 function stripTags(s) {
     if (!s) return "";
     return htmlDecode(String(s).replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ")).trim();
 }
-
-function getHost(url) {
-    try { var m = String(url).match(/^https?:\/\/([^\/?#]+)/); return m ? m[1].toLowerCase() : ""; }
-    catch (e) { return ""; }
-}
-
-function getRoot(url) {
-    try { var m = String(url).match(/^(https?:\/\/[^\/?#]+)/); return m ? m[1] : ""; }
-    catch (e) { return ""; }
-}
-
-function fullUrl(base, u) {
-    if (!u) return "";
-    u = String(u).trim();
-    if (u.indexOf("http") === 0) return u;
-    if (u.indexOf("//") === 0) return "https:" + u;
-    return getRoot(base) + (u.indexOf("/") === 0 ? u : "/" + u);
-}
-
-function slugify(s) {
-    return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
-function slugToTitle(slug) {
-    return String(slug || "").replace(/-/g, " ").replace(/\b\w/g, function(c) { return c.toUpperCase(); });
-}
-
+function getHost(url) { try { var m = String(url).match(/^https?:\/\/([^\/?#]+)/); return m ? m[1].toLowerCase() : ""; } catch (e) { return ""; } }
+function getRoot(url) { try { var m = String(url).match(/^(https?:\/\/[^\/?#]+)/); return m ? m[1] : ""; } catch (e) { return ""; } }
+function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
+function slugToTitle(s) { return String(s || "").replace(/-/g, " ").replace(/\b\w/g, function(c) { return c.toUpperCase(); }); }
 function b64decode(s) {
     try { return decodeURIComponent(atob(s).split("").map(function(c) { return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2); }).join("")); }
     catch (e) { try { return atob(s); } catch (e2) { return ""; } }
 }
 
+// ===================== FIX IMAGE URLS =====================
 function fixImg(u) {
     if (!u) return "";
     var s = String(u).trim();
-    if (s.indexOf("http") !== 0) s = "https://" + s;
-    return s;
+    if (!s) return "";
+    // Fix "ttps://" → "https://"
+    if (s.indexOf("ttps://") === 0) s = "https" + s.substring(4);
+    // Already a full URL
+    if (s.indexOf("http") === 0) return s;
+    // It's a TMDB path like "kYjHS43tFzPfRfm9PjwbSwg0bTz.jpg" or "6THwQPQn2TS1EAkXzmko1CBGYJV"
+    if (s.indexOf(".") !== -1 || s.length > 10) {
+        if (s.indexOf("/") === -1) {
+            if (s.indexOf(".jpg") === -1 && s.indexOf(".png") === -1 && s.indexOf(".webp") === -1) s = s + ".jpg";
+            return TMDB_IMG + "/" + s;
+        }
+    }
+    return "";
 }
 
 // ===================== GrayJay Models =====================
@@ -82,7 +62,6 @@ function mkThumb(url) {
     if (!url) return new Thumbnails([]);
     return new Thumbnails([new Thumbnail(url, 100)]);
 }
-
 function mkVideo(id, title, thumb, url, authorName) {
     initPlatformID();
     return new PlatformVideo({
@@ -93,17 +72,14 @@ function mkVideo(id, title, thumb, url, authorName) {
         uploadDate: _now, url: url, duration: -1, viewCount: -1, isLive: false
     });
 }
-
 function mkHls(url, name) {
     if (!url) return null;
     return new HLSSource({ name: name || "HLS", url: url, duration: 0 });
 }
-
 function mkSrc(valid) {
     try { return new VideoSourceDescriptor(valid); } catch (e) {}
     return { plugin_type: "MuxVideoSourceDescriptor", isUnMuxed: false, videoSources: valid };
 }
-
 function mkDetail(id, name, thumb, url, videoSources, description) {
     initPlatformID();
     var sources = videoSources || [];
@@ -145,17 +121,13 @@ function ppHome() {
     try {
         var data = ppGet("/movies/resume");
         if (!data || !data.movies) return videos;
-        var movies = data.movies;
-        for (var i = 0; i < movies.length && i < 40; i++) {
-            var m = movies[i];
-            var id = m.a;
-            var title = m.b || "";
-            var poster = fixImg(m.c || "");
-            var backdrop = fixImg(m.d || "");
+        for (var i = 0; i < data.movies.length && i < 40; i++) {
+            var m = data.movies[i];
+            var thumb = fixImg(m.d) || fixImg(m.c) || "";
             var year = m.f || "";
             var quality = m.l || "";
-            var thumb = backdrop || poster;
-            if (title) videos.push(mkVideo("pp_m_" + id, (quality ? "[" + quality + "] " : "") + title + (year ? " (" + year + ")" : ""), thumb, "pp://movie/" + id, "PlayPelis"));
+            var label = quality ? "[" + quality + "] " : "";
+            if (m.b) videos.push(mkVideo("pp_m_" + m.a, label + m.b + (year ? " (" + year + ")" : ""), thumb, "pp://movie/" + m.a, "PlayPelis"));
         }
     } catch (e) {}
     return videos;
@@ -172,11 +144,10 @@ function ppSearch(query) {
                 var t = (m.b || "").toLowerCase();
                 var o = (m.i || "").toLowerCase();
                 if (t.indexOf(q) !== -1 || o.indexOf(q) !== -1) {
-                    var poster = fixImg(m.c || "");
-                    var backdrop = fixImg(m.d || "");
+                    var thumb = fixImg(m.d) || fixImg(m.c) || "";
                     var year = m.f || "";
                     var quality = m.l || "";
-                    videos.push(mkVideo("pp_m_" + m.a, (quality ? "[" + quality + "] " : "") + m.b + (year ? " (" + year + ")" : ""), backdrop || poster, "pp://movie/" + m.a, "PlayPelis"));
+                    videos.push(mkVideo("pp_m_" + m.a, (quality ? "[" + quality + "] " : "") + m.b + (year ? " (" + year + ")" : ""), thumb, "pp://movie/" + m.a, "PlayPelis"));
                 }
             }
         }
@@ -187,7 +158,8 @@ function ppSearch(query) {
                 var st = (s.b || "").toLowerCase();
                 var so = (s.i || "").toLowerCase();
                 if (st.indexOf(q) !== -1 || so.indexOf(q) !== -1) {
-                    videos.push(mkVideo("pp_s_" + s.a, "[Serie] " + s.b, fixImg(s.d || s.c || ""), "pp://serie/" + s.a, "PlayPelis"));
+                    var sthumb = fixImg(s.d) || fixImg(s.c) || "";
+                    videos.push(mkVideo("pp_s_" + s.a, "[Serie] " + s.b, sthumb, "pp://serie/" + s.a, "PlayPelis"));
                 }
             }
         }
@@ -200,10 +172,8 @@ function ppMovieDetails(id) {
         var data = ppGet("/movies/" + id);
         if (!data) return mkDetail("pp_m_" + id, "Sin resultado", "", "pp://movie/" + id, [], "");
         var title = data.b || "";
-        var poster = fixImg(data.c || "");
-        var backdrop = fixImg(data.d || "");
+        var thumb = fixImg(data.d) || fixImg(data.c) || "";
         var overview = data.e || "";
-        var thumb = backdrop || poster;
         var linksData = ppGet("/movies/" + id + "/links");
         var desc = overview;
         if (linksData && linksData.length) {
@@ -212,7 +182,6 @@ function ppMovieDetails(id) {
                 var link = linksData[i];
                 desc += "\n" + (link.b || "") + " " + (link.c || "") + " → " + link.a;
             }
-            desc += "\n\n(Usa otro reproductor para ver estos links)";
         }
         return mkDetail("pp_m_" + id, title, thumb, "pp://movie/" + id, [], desc);
     } catch (e) {
@@ -225,19 +194,17 @@ function ppSerieDetails(id) {
         var data = ppGet("/series/" + id);
         if (!data) return mkDetail("pp_s_" + id, "Sin resultado", "", "pp://serie/" + id, [], "");
         var title = data.name || "";
-        var poster = fixImg(data.poster || "");
-        var backdrop = fixImg(data.backdrop || "");
+        var thumb = fixImg(data.backdrop) || fixImg(data.poster) || "";
         var overview = data.overview || "";
-        var thumb = backdrop || poster;
         var desc = overview;
         if (data.seasonList) {
             for (var si = 0; si < data.seasonList.length; si++) {
                 var season = data.seasonList[si];
                 if (season.episodes) {
-                    desc += "\n\n--- Temporada " + season.num + " (" + season.episodes.length + " episodios) ---";
+                    desc += "\n\n--- Temporada " + season.num + " (" + season.episodes.length + " eps) ---";
                     for (var ei = 0; ei < season.episodes.length; ei++) {
                         var ep = season.episodes[ei];
-                        desc += "\nEp " + season.num + "x" + ep.num + " " + (ep.name || "") + " → pp://serie/" + id + "/links/" + season.num + "/" + ep.num;
+                        desc += "\nEp " + season.num + "x" + ep.num + " → pp://serie/" + id + "/links/" + season.num + "/" + ep.num;
                     }
                 }
             }
@@ -251,14 +218,13 @@ function ppSerieDetails(id) {
 function ppEpisodeLinks(serieId, season, episode) {
     try {
         var data = ppGet("/series/" + serieId + "/links/" + season + "/" + episode);
-        var sources = [];
         var desc = "Servidores disponibles:";
         if (data && data.length) {
             for (var i = 0; i < data.length; i++) {
                 desc += "\n" + (data[i].b || "") + " " + (data[i].c || "") + " → " + data[i].a;
             }
         }
-        return mkDetail("pp_ep_" + serieId + "_" + season + "_" + episode, "Ep " + season + "x" + episode, "", "pp://serie/" + serieId + "/links/" + season + "/" + episode, sources, desc);
+        return mkDetail("pp_ep_" + serieId + "_" + season + "_" + episode, "Ep " + season + "x" + episode, "", "pp://serie/" + serieId + "/links/" + season + "/" + episode, [], desc);
     } catch (e) {
         return mkDetail("", "Error", "", "", [], "Error: " + String(e));
     }
@@ -281,7 +247,7 @@ function jkaSearch(query) {
         var thumb = "";
         var im = html.match(/<img[^>]*src=["']([^"']+animes\/(?:image|video)\/[^"']+)["']/);
         if (!im) im = html.match(/<img[^>]*src=["']([^"']+(?:cover|portada))[^"']*["']/);
-        if (im) thumb = fullUrl(url, im[1]);
+        if (im) thumb = im[1].indexOf("http") === 0 ? im[1] : (im[1].indexOf("//") === 0 ? "https:" + im[1] : JK + (im[1].indexOf("/") === 0 ? "" : "/") + im[1]);
         out.push({title: title, url: url, thumb: thumb});
     } catch (e) {}
     return out;
@@ -339,7 +305,7 @@ function jkaDetails(url) {
         if (!title) { tm = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i); if (tm) title = htmlDecode(tm[1]); }
         var thumb = "";
         var im = html.match(/<img[^>]*src=["']([^"']+animes\/(?:image|video)\/[^"']+)["']/);
-        if (im) thumb = fullUrl(url, im[1]);
+        if (im) thumb = im[1].indexOf("http") === 0 ? im[1] : (im[1].indexOf("//") === 0 ? "https:" + im[1] : JK + (im[1].indexOf("/") === 0 ? "" : "/") + im[1]);
         var desc = "";
         tm = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
         if (tm) desc = htmlDecode(tm[1]);
