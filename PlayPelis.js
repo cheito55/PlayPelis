@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v35 - Extractor Estructurado Avanzado
+// PlayPelis GrayJay Source v34 - Extractor Estructurado Avanzado
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
