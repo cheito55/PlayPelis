@@ -13,18 +13,15 @@
     "packages": ["Http"],
     "allowEval": false,
     "allowUrls": [
-        "plpro.org",
-        "jkanime.net",
-        "image.tmdb.org",
-        "playpelis.app",
-        "nika.playmudos.com",
-        "voe.sx",
-        "vidhidefast.com",
-        "hlsflex.com",
-        "do7go.com",
-        "streamwish.to",
-        "doodstream.com",
-        "callistanise.com",
-        "playmogo.com"
-    ]
+        "allowUrls": [
+    "*.playpelis.app",
+    "*.jkanime.net",
+    "*.plpro.org",
+    "*.voe.sx",
+    "*.vidhidefast.com",
+    "*.callistanise.com",
+    "*.do7go.com",
+    "*.playmogo.com",
+    "*.hlsflex.com"
+]
 }
