@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v34 - Con extractor VidHideFast desempaquetado
+// PlayPelis GrayJay Source v35 - Extractor VidHideFast robusto
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -11,9 +11,7 @@ var IPTV_PASS = "p";
 var JK = "https://jkanime.net";
 var TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
-function initPlatformID() {
-    if (!PPID) PPID = new PlatformID("PlayPelis", "PlayPelis", PID);
-}
+function initPlatformID() { if (!PPID) PPID = new PlatformID("PlayPelis", "PlayPelis", PID); }
 
 function httpGet(url, headers) {
     try {
@@ -27,12 +25,8 @@ function httpGet(url, headers) {
 // =========================================================
 // HELPERS
 // =========================================================
-function slugify(s) {
-    return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-function slugToTitle(s) {
-    return String(s || "").replace(/-/g, " ").replace(/\b\w/g, function(c) { return c.toUpperCase(); });
-}
+function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
+function slugToTitle(s) { return String(s || "").replace(/-/g, " ").replace(/\b\w/g, function(c) { return c.toUpperCase(); }); }
 function htmlDecode(s) {
     if (!s) return "";
     return String(s).replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
@@ -56,56 +50,83 @@ function fixImg(u) {
     }
     return "";
 }
+function getHost(url) {
+    try { var m = String(url).match(/^https?:\/\/([^\/?#]+)/i); return m ? m[1].toLowerCase() : ""; }
+    catch (e) { return ""; }
+}
 
 // =========================================================
-// DESPAQUETADOR DE JS (Packer de Dean Edwards / Webtoolkit)
+// DESPAQUETADOR JS (Packer) - con validaciones
 // =========================================================
 function unpackPacked(html) {
-    // Buscar eval(function(p,a,c,k,e,d){...}('...'))
+    if (!html || html.length < 200) return null;
+
     var evalIdx = html.indexOf("eval(function(p,a,c,k,e,d)");
     if (evalIdx === -1) return null;
 
-    // Encontrar el cierre de eval(...)
-    var depth = 0;
-    var evalEnd = -1;
+    // Encontrar cierre de eval(...) contando paréntesis con cuidado
+    var depth = 0, evalEnd = -1;
+    var inString = false, stringChar = "";
     for (var i = evalIdx + 4; i < html.length; i++) {
-        if (html[i] === '(') depth++;
-        if (html[i] === ')') { depth--; if (depth === 0) { evalEnd = i + 1; break; } }
+        var ch = html[i];
+        if (inString) {
+            if (ch === "\\") { i++; continue; }
+            if (ch === stringChar) inString = false;
+            continue;
+        }
+        if (ch === "'" || ch === '"') { inString = true; stringChar = ch; continue; }
+        if (ch === "(") depth++;
+        if (ch === ")") { depth--; if (depth === 0) { evalEnd = i + 1; break; } }
     }
-    if (evalEnd === -1) return null;
+    if (evalEnd === -1 || evalEnd <= evalIdx) return null;
 
     var packed = html.substring(evalIdx + 5, evalEnd - 1);
+    if (packed.length < 50) return null;
 
-    // Extraer los args del packed
     var funcEnd = packed.indexOf("}(");
-    if (funcEnd === -1) return null;
+    if (funcEnd === -1 || funcEnd < 10) return null;
     var argsStr = packed.substring(funcEnd + 2);
+    if (argsStr.length < 20) return null;
 
-    // Parsear desde atrás: .split('|') al final
+    // Buscar .split('|') al final
     var splitIdx = argsStr.lastIndexOf(".split('|')");
-    if (splitIdx === -1) return null;
+    if (splitIdx === -1 || splitIdx < 10) return null;
 
+    // Extraer key array
     var keyEnd = argsStr.lastIndexOf("'", splitIdx);
     var keyStart = argsStr.lastIndexOf("'", keyEnd - 1) + 1;
+    if (keyStart <= 0 || keyEnd <= keyStart) return null;
     var key = argsStr.substring(keyStart, keyEnd);
+    if (key.length < 5) return null;
     var keyArr = key.split("|");
+    if (keyArr.length < 10) return null;
 
+    // Extraer base, count, payload
     var beforeKey = argsStr.substring(0, keyStart - 2);
-    var parts = beforeKey.split(",");
-    var base = parseInt(parts[parts.length - 2]);
-    var count = parseInt(parts[parts.length - 1]);
-    var payload = beforeKey.substring(0, beforeKey.lastIndexOf("'"));
+    var lastComma = beforeKey.lastIndexOf(",");
+    var prevComma = beforeKey.lastIndexOf(",", lastComma - 1);
+    if (lastComma === -1 || prevComma === -1) return null;
+
+    var base = parseInt(beforeKey.substring(prevComma + 1, lastComma));
+    var count = parseInt(beforeKey.substring(lastComma + 1));
+    if (isNaN(base) || base < 2 || base > 62) return null;
+    if (isNaN(count) || count < 1) return null;
+
+    var payloadEnd = beforeKey.lastIndexOf("'");
+    var payloadStart = beforeKey.lastIndexOf("'", payloadEnd - 1) + 1;
+    if (payloadStart <= 0 || payloadEnd <= payloadStart) return null;
+    var payload = beforeKey.substring(payloadStart, payloadEnd);
+    if (payload.length < 5) return null;
 
     // Algoritmo unpacker
     var payloadArr = payload.split("|");
     var result = [];
     for (var j = 0; j < payloadArr.length; j++) {
         var token = payloadArr[j];
-        if (token === "") {
-            result.push(" ");
-        } else {
+        if (token === "") { result.push(" "); }
+        else {
             var idx = parseInt(token, base);
-            if (!isNaN(idx) && idx >= 0 && idx < keyArr.length) {
+            if (!isNaN(idx) && idx >= 0 && idx < keyArr.length && keyArr[idx]) {
                 result.push(keyArr[idx]);
             } else {
                 result.push(token);
@@ -113,15 +134,33 @@ function unpackPacked(html) {
         }
     }
 
-    return { code: result.join(""), keyArr: keyArr };
+    var code = result.join("");
+    if (code.length < 10) return null;
+    return { code: code, keyArr: keyArr };
 }
 
 // =========================================================
-// EXTRACTOR VidHideFast - Desempaqueta + decodifica URLs
+// DECODIFICADOR DE URLs (segunda capa de ofuscación)
 // =========================================================
-function vidhideExtract(pageUrl) {
+function decodeUrlTokens(str, keyArr) {
+    if (!str || !keyArr) return str;
+    return str.replace(/[a-z][a-z0-9]+/g, function(token) {
+        var val = parseInt(token, 36);
+        if (!isNaN(val) && val > 0 && val < keyArr.length && keyArr[val] && keyArr[val].length > 1) {
+            return keyArr[val];
+        }
+        return token;
+    });
+}
+
+// =========================================================
+// EXTRACTOR VidHideFast / Callistanise
+// Flujo: HTML → unpack eval → decode URLs → buscar master
+// =========================================================
+function vidhideExtract(pageUrl, referer) {
+    var ref = referer || pageUrl;
     try {
-        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
+        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": ref });
         if (!html || html.length < 500) return null;
 
         var unpacked = unpackPacked(html);
@@ -130,82 +169,63 @@ function vidhideExtract(pageUrl) {
         var code = unpacked.code;
         var keyArr = unpacked.keyArr;
 
-        // Buscar URLs en el código descomprimido
-        var urlMatches = code.match(/https?:\/\/[^\s"'<>]+/g);
-        if (!urlMatches) return null;
+        // Buscar strings entre comillas en el código descomprimido
+        var strings = code.match(/"[^"]{10,}"/g) || [];
+        strings = strings.concat(code.match(/'[^']{10,}'/g) || []);
 
-        // Decodificar la segunda capa de ofuscación
-        function decodeUrl(str) {
-            return str.replace(/[a-z0-9]+/g, function(token) {
-                var val = parseInt(token, 36);
-                if (!isNaN(val) && val >= 0 && val < keyArr.length && keyArr[val]) {
-                    return keyArr[val];
-                }
-                return token;
-            });
-        }
+        // Decodificar y buscar URLs de streaming
+        var candidates = [];
+        for (var i = 0; i < strings.length; i++) {
+            var s = strings[i].substring(1, strings[i].length - 1);
+            var decoded = decodeUrlTokens(s, keyArr);
 
-        // Buscar la URL del master.m3u8 o master.txt
-        for (var i = 0; i < urlMatches.length; i++) {
-            var decoded = decodeUrl(urlMatches[i]);
-            if (decoded.indexOf("master.") !== -1 &&
-                (decoded.indexOf(".m3u8") !== -1 || decoded.indexOf(".txt") !== -1)) {
-                // Cambiar .m3u8 a .txt si es necesario (algunos CDN lo necesitan)
-                var finalUrl = decoded;
-                if (finalUrl.indexOf(".m3u8") !== -1) {
-                    // Primero intentar con .txt
-                    var txtUrl = finalUrl.replace(/\.m3u8.*$/, ".txt");
-                    return txtUrl;
+            // Buscar URLs con /hls/ o master
+            if (decoded.indexOf("master.") !== -1) {
+                if (decoded.indexOf(".txt") !== -1 || decoded.indexOf(".m3u8") !== -1) {
+                    // Asegurar URL absoluta
+                    if (decoded.indexOf("http") !== 0) {
+                        var proto = "https://";
+                        var hostPart = decoded.match(/^[\/]*([^\/]+)/);
+                        if (hostPart) decoded = proto + hostPart[1] + decoded.substring(hostPart[0].length);
+                    }
+                    candidates.push(decoded);
                 }
-                return finalUrl;
             }
         }
 
-        // Si no hay master, buscar cualquier .txt/.m3u8
-        for (var j = 0; j < urlMatches.length; j++) {
-            var decoded2 = decodeUrl(urlMatches[j]);
-            if (decoded2.indexOf(".m3u8") !== -1 || decoded2.indexOf(".txt") !== -1) {
-                return decoded2;
-            }
-        }
+        // Intentar cada candidata, preferir .txt sobre .m3u8
+        candidates.sort(function(a, b) {
+            if (a.indexOf(".txt") !== -1 && b.indexOf(".m3u8") !== -1) return -1;
+            if (a.indexOf(".m3u8") !== -1 && b.indexOf(".txt") !== -1) return 1;
+            return 0;
+        });
 
-        return null;
-    } catch (e) { return null; }
-}
-
-// =========================================================
-// EXTRACTOR Voe
-// =========================================================
-function voeExtract(pageUrl) {
-    try {
-        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
-        if (!html) return null;
-        var m = html.match(/hls\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
-        if (m && m[1]) return m[1];
-        m = html.match(/atob\('([^']+)'\)/);
-        if (m) {
+        for (var j = 0; j < candidates.length; j++) {
+            var testUrl = candidates[j];
             try {
-                var d = decodeURIComponent(atob(m[1]).split("").map(function(c) {
-                    return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
-                }).join(""));
-                var u = d.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
-                if (u) return u[0];
+                var test = httpGet(testUrl, { "User-Agent": UA, "Referer": ref });
+                if (test && test.indexOf("#EXTM3U") !== -1) {
+                    return testUrl;
+                }
             } catch (e) {}
         }
+
         return null;
     } catch (e) { return null; }
 }
 
 // =========================================================
-// EXTRACTOR GENÉRICO (respaldo)
+// EXTRACTOR GENÉRICO (respaldo para servidores simples)
 // =========================================================
-function genericExtract(pageUrl) {
+function genericExtract(pageUrl, referer) {
+    var ref = referer || pageUrl;
     try {
-        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
+        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": ref });
         if (!html) return null;
         var pats = [
             /file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
-            /sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/
+            /source\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
+            /src\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/
         ];
         for (var i = 0; i < pats.length; i++) {
             var m = html.match(pats[i]);
@@ -218,25 +238,14 @@ function genericExtract(pageUrl) {
 }
 
 // =========================================================
-// EXTRACTOR UNIFICADO - intenta todos los métodos
+// EXTRACTOR UNIFICADO
 // =========================================================
 function extractVideo(pageUrl) {
-    var host = "";
-    try {
-        var hm = String(pageUrl).match(/^https?:\/\/([^\/?#]+)/i);
-        host = hm ? hm[1].toLowerCase() : "";
-    } catch (e) {}
+    var host = getHost(pageUrl);
 
-    // VidHideFast - desempaquetador específico
-    if (host.indexOf("vidhide") !== -1 || host.indexOf("vidhidefast") !== -1) {
-        var r = vidhideExtract(pageUrl);
-        if (r) return r;
-    }
-
-    // VoE
-    if (host.indexOf("voe") !== -1) {
-        var r2 = voeExtract(pageUrl);
-        if (r2) return r2;
+    // VidHideFast / Callistanise (dominio de redirección)
+    if (host.indexOf("vidhide") !== -1 || host.indexOf("callistanise") !== -1) {
+        return vidhideExtract(pageUrl);
     }
 
     // Genérico para todos los demás
@@ -288,7 +297,7 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
 }
 
 // =========================================================
-// JKANIME
+// JKANIME - Búsqueda
 // =========================================================
 function jkaSearch(query) {
     var out = [];
@@ -317,6 +326,9 @@ function jkaSearch(query) {
     return out;
 }
 
+// =========================================================
+// JKANIME - Extracción de video (m3u8 directo)
+// =========================================================
 function jkaExtractVideo(episodeUrl) {
     try {
         var html = httpGet(episodeUrl, { "Referer": JK + "/" });
@@ -333,6 +345,9 @@ function jkaExtractVideo(episodeUrl) {
     } catch (e) { return null; }
 }
 
+// =========================================================
+// JKANIME - Detalles
+// =========================================================
 function jkaDetails(url) {
     try {
         var html = httpGet(url, { "Referer": JK + "/" });
@@ -382,7 +397,6 @@ function ppGet(path) {
         return JSON.parse(response.body);
     } catch (e) { return null; }
 }
-
 function ppHome() {
     var videos = [];
     try {
@@ -395,10 +409,8 @@ function ppHome() {
     } catch (e) {}
     return videos;
 }
-
 function ppSearch(query) {
-    var videos = [];
-    var q = String(query || "").toLowerCase();
+    var videos = []; var q = String(query || "").toLowerCase();
     try {
         var data = ppGet("/movies/resume");
         if (data && data.movies) {
@@ -421,7 +433,6 @@ function ppSearch(query) {
     } catch (e) {}
     return videos;
 }
-
 function ppMovieDetails(id) {
     try {
         var data = ppGet("/movies/" + id);
@@ -438,7 +449,6 @@ function ppMovieDetails(id) {
                 var link = linksData[i];
                 var linkUrl = link.a || "";
                 desc += "\n" + (link.b || "srv") + " [" + (link.c || "") + "] → " + linkUrl;
-                // Intentar extraer video de cada servidor
                 var videoUrl = extractVideo(linkUrl);
                 if (videoUrl) {
                     var src = mkHls(videoUrl, (link.b || "") + " " + (link.c || ""));
@@ -449,7 +459,6 @@ function ppMovieDetails(id) {
         return mkDetail("pp_m_" + id, title, thumb, "pp://movie/" + id, sources, desc);
     } catch (e) { return mkDetail("pp_m_" + id, "Error", "", "pp://movie/" + id, [], String(e)); }
 }
-
 function ppSerieDetails(id) {
     try {
         var data = ppGet("/series/" + id);
@@ -470,7 +479,6 @@ function ppSerieDetails(id) {
         return mkDetail("pp_s_" + id, title, thumb, "pp://serie/" + id, [], desc);
     } catch (e) { return mkDetail("pp_s_" + id, "Error", "", "pp://serie/" + id, [], String(e)); }
 }
-
 function ppEpisodeLinks(id, season, episode) {
     try {
         var data = ppGet("/series/" + id);
@@ -511,7 +519,6 @@ function doSearch(query) {
     } catch (e) {}
     return results;
 }
-
 function doDetails(url) {
     if (!url) return mkDetail("", "", "", "", [], "");
     if (url.indexOf("jkanime.net") !== -1) return jkaDetails(url);
@@ -522,7 +529,6 @@ function doDetails(url) {
     }
     return mkDetail("", "", "", url, [], "");
 }
-
 function doHome() {
     var videos = [];
     try { var r = ppHome(); for (var i = 0; i < r.length; i++) videos.push(r[i]); } catch (e) {}
