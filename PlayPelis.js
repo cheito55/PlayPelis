@@ -334,17 +334,3 @@ if (typeof source !== "undefined") {
     source.isChannelUrl = function(url) { return false; };
     source.searchSuggestions = function(query) { return []; };
 }
-PlayPelis.json (v28) ya lo tenés arriba.
-
-Los cambios en v28:
-
-✅ Extractor genérico extractVideoUrl() con patrones de Voe (hls:, `/hls/) y genérico (file:, sources:)
-✅ Se aplica a cada link de servidor de PlayerPro antes de mostrar
-✅ Si el extractor encuentra m3u8, se reproduce directo
-✅ Si no lo encuentra, muestra el link en la descripción
-
-Fork
-
-Copy
-
-Type a message... (@ for files)
