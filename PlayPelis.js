@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v33 - Anti-Crash + Debug
+// PlayPelis GrayJay Source v35 - Extractor Estructurado Avanzado
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -121,6 +121,9 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
     });
 }
 
+// =========================================================
+// EXTRACTOR EN CASCADA (Vidhide, Do7go, Voe, etc.)
+// =========================================================
 function tryExtractM3u8(pageUrl) {
     addDebug("Intentando extraer: " + pageUrl);
     var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
@@ -128,24 +131,41 @@ function tryExtractM3u8(pageUrl) {
         addDebug("HTML devuelto fue NULO.");
         return null;
     }
-    
-    addDebug("Tamaño HTML recibido: " + html.length + " bytes");
-    addDebug("HTML Inicio: " + html.substring(0, 200));
 
     var host = getHost(pageUrl);
+
+    // CASO 1: Vidhide / Do7go / Playmogo (DoodStream clones)
+    if (host.indexOf("vidhide") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("playmogo") !== -1 || host.indexOf("callistanise") !== -1) {
+        // Buscar enlaces .m3u8 o .mp4 directos ocultos en el código
+        var directMatch = html.match(/https?:\/\/[^"'\s<>]+\.(m3u8|mp4)[^"'\s<>]*/i);
+        if (directMatch) {
+            addDebug("Encontrado enlace directo en Vidhide/Do7go.");
+            return directMatch[0];
+        }
+
+        // Buscar dentro de bloques eval / packed o scripts internos de reproductor
+        var scriptMatch = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/);
+        if (scriptMatch && scriptMatch[1]) {
+            return scriptMatch[1];
+        }
+    }
+
+    // CASO 2: Voe
     if (host.indexOf("voe") !== -1) {
         var m = html.match(/hls\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
         if (m && m[1]) return m[1];
-        m = html.match(/atob\('([^']+)'\)/);
-        if (m) {
+        
+        var atobMatch = html.match(/atob\('([^']+)'\)/);
+        if (atobMatch) {
             try {
-                var d = b64decode(m[1]);
-                var u = d.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
+                var decoded = b64decode(atobMatch[1]);
+                var u = decoded.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
                 if (u) return u[0];
             } catch (e) {}
         }
     }
 
+    // CASO 3: Patrones genéricos de respaldo
     var pats = [
         /file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
         /sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/,
@@ -157,7 +177,7 @@ function tryExtractM3u8(pageUrl) {
         if (m2) return m2[1] || m2[0];
     }
 
-    addDebug("No se encontró patrón m3u8.");
+    addDebug("No se encontró patrón m3u8/mp4 válido.");
     return null;
 }
 
@@ -217,7 +237,7 @@ function jkaSearch(query) {
         var html = httpGet(JK + "/buscar/" + slug + "/", { "Referer": JK + "/" });
         if (!html) return out;
 
-        var re = /<div class="anime__item">\s*<a\s+href="(https?:\/\/jkanime\.net\/[a-z0-9-]+\/)"[^>]*>[\s\S]*?<div[^>]*data-setbg="([^"]*)"[\s\S]*?<h5><a[^>]*>([^<]+)<\/a><\/h5>/gi;
+        var re = /<div class="anime__item">\s*<a\s+href="(https?:\/\/jkanime\.net\/[a-z0-9-+\/]+)"[^>]*>[\s\S]*?<div[^>]*data-setbg="([^"]*)"[\s\S]*?<h5><a[^>]*>([^<]+)<\/a><\/h5>/gi;
         var m;
         while ((m = re.exec(html)) && out.length < 30) out.push({ title: htmlDecode(m[3]), url: m[1], thumb: m[2] });
     } catch (e) {}
@@ -270,34 +290,23 @@ function jkaDetails(url) {
 function jkaExtractVideo(episodeUrl) {
     addDebug("JKA: Extrayendo episodio " + episodeUrl);
     var html = httpGet(episodeUrl, { "Referer": JK + "/" });
-    if (!html) {
-        addDebug("JKA: HTML del episodio es nulo.");
-        return null;
-    }
+    if (!html) return null;
 
     var re = /video\[\d+\]\s*=\s*'[^']*src="(https?:\/\/jkanime\.net\/jkplayer\/um[^"]*)"/i;
     var m = html.match(re);
     if (!m || !m[1]) {
-        addDebug("JKA: No se encontró iframe jkplayer/um.");
-        return null;
+        re = /src="(https?:\/\/jkanime\.net\/jkplayer\/um\?[^"]+)"/i;
+        m = html.match(re);
     }
+    if (!m || !m[1]) return null;
 
     var playerUrl = m[1].replace(/&amp;/g, "&");
-    addDebug("JKA: Cargando reproductor: " + playerUrl);
     var playerHtml = httpGet(playerUrl, { "Referer": episodeUrl });
-    
-    if (!playerHtml) {
-        addDebug("JKA: HTML del reproductor retornó nulo. Posible bloqueo antibot/Cloudflare.");
-        return null;
-    }
-
-    addDebug("JKA Player HTML length: " + playerHtml.length);
-    addDebug("JKA Player snippet: " + playerHtml.substring(0, 200));
+    if (!playerHtml) return null;
 
     var m3u8 = playerHtml.match(/url\s*[:=]\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
     if (m3u8 && m3u8[1]) return mkHls(m3u8[1], "JkAnime");
 
-    addDebug("JKA: No se encontró URL m3u8 en el reproductor.");
     return null;
 }
 
@@ -334,14 +343,13 @@ if (typeof source !== "undefined") {
     source.setSettings = function(s) { _settings = s || {}; };
     source.enable = function(c, s) { _settings = s || {}; };
     source.getSearchCapabilities = function() { return { types: [2], sorts: [], filters: [] }; };
-    source.search = function(query) { return new VideoPager(new doSearch(query || ""), false, null); };
+    source.search = function(query) { return new VideoPager(doSearch(query || ""), false, null); };
     source.isContentDetailsUrl = function(url) { return url && (url.indexOf("jkanime.net") !== -1 || url.indexOf("pp://") !== -1); };
     source.getVideoDetails = function(url) { return source.getContentDetails(url); };
     source.getHome = function() { return new VideoPager(doHome(), false, null); };
     source.isChannelUrl = function(url) { return false; };
     source.searchSuggestions = function(query) { return []; };
 
-    // BARRERA ANTI-CRASH DEFINITIVA
     source.getContentDetails = function(url) {
         try {
             var r = doDetails(url);
