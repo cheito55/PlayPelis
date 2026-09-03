@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v35 - Estable y Robusto
+// PlayPelis GrayJay Source v36 - Extractor Avanzado Integrado
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -121,6 +121,27 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
     });
 }
 
+// =========================================================
+// BUSCADOR MULTINIVEL DE MEDIOS
+// =========================================================
+function findDirectMedia(html) {
+    if (!html) return null;
+
+    var m = html.match(/https?:\/\/[^"'\\<>\s]+?\.(?:m3u8|mp4)(?:\?[^"'\\<>\s]*)?/i);
+    if (m && m[0]) return m[0];
+
+    m = html.match(/file\s*:\s*["']([^"']+\.(?:m3u8|mp4)(?:\?[^"']*)?)["']/i);
+    if (m && m[1]) return m[1];
+
+    m = html.match(/source\s*:\s*["']([^"']+\.(?:m3u8|mp4)(?:\?[^"']*)?)["']/i);
+    if (m && m[1]) return m[1];
+
+    m = html.match(/src\s*:\s*["']([^"']+\.(?:m3u8|mp4)(?:\?[^"']*)?)["']/i);
+    if (m && m[1]) return m[1];
+
+    return null;
+}
+
 function tryExtractM3u8(pageUrl) {
     addDebug("Intentando extraer: " + pageUrl);
     var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
@@ -128,45 +149,68 @@ function tryExtractM3u8(pageUrl) {
         addDebug("HTML devuelto fue NULO.");
         return null;
     }
+    
+    addDebug("Tamaño HTML recibido: " + html.length + " bytes");
+    addDebug("HTML Inicio: " + html.substring(0, 200).replace(/\s+/g, " "));
 
-    var host = getHost(pageUrl);
+    var host = getHost(pageUrl).toLowerCase();
 
-    if (host.indexOf("vidhide") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("playmogo") !== -1 || host.indexOf("callistanise") !== -1) {
-        var directMatch = html.match(/https?:\/\/[^"'\s<>]+\.(m3u8|mp4)[^"'\s<>]*/i);
-        if (directMatch) {
-            addDebug("Encontrado enlace directo en Vidhide/Do7go.");
-            return directMatch[0];
-        }
-
-        var scriptMatch = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/);
-        if (scriptMatch && scriptMatch[1]) {
-            return scriptMatch[1];
-        }
+    // NIVEL 1: Buscar video directo
+    var direct = findDirectMedia(html);
+    if (direct) {
+        addDebug("FUENTE DIRECTA ENCONTRADA: " + direct);
+        return direct;
     }
 
-    if (host.indexOf("voe") !== -1) {
-        var m = html.match(/hls\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
-        if (m && m[1]) return m[1];
-        
-        var atobMatch = html.match(/atob\('([^']+)'\)/);
-        if (atobMatch) {
-            try {
-                var decoded = b64decode(atobMatch[1]);
-                var u = decoded.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
-                if (u) return u[0];
-            } catch (e) {}
-        }
-    }
-
-    var pats = [
-        /file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
-        /sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/,
-        /https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i,
-        /https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*/i
+    // NIVEL 2: Buscar en configuraciones comunes
+    var patterns = [
+        /["']file["']\s*:\s*["']([^"']+)["']/i,
+        /["']src["']\s*:\s*["']([^"']+)["']/i,
+        /["']source["']\s*:\s*["']([^"']+)["']/i,
+        /["']url["']\s*:\s*["']([^"']+)["']/i,
+        /["']video["']\s*:\s*["']([^"']+)["']/i,
+        /["']stream["']\s*:\s*["']([^"']+)["']/i
     ];
-    for (var i = 0; i < pats.length; i++) {
-        var m2 = html.match(pats[i]);
-        if (m2) return m2[1] || m2[0];
+
+    for (var i = 0; i < patterns.length; i++) {
+        var pm = html.match(patterns[i]);
+        if (!pm || !pm[1]) continue;
+        var candidate = pm[1];
+        if (candidate.indexOf(".m3u8") !== -1 || candidate.indexOf(".mp4") !== -1) {
+            addDebug("FUENTE EN CONFIGURACIÓN: " + candidate);
+            return candidate;
+        }
+    }
+
+    // NIVEL 3: Base64 simple
+    var base64Patterns = [
+        /atob\(\s*['"]([^'"]+)['"]\s*\)/i,
+        /base64\s*[:=]\s*['"]([^'"]+)['"]/i
+    ];
+
+    for (var b = 0; b < base64Patterns.length; b++) {
+        var bm = html.match(base64Patterns[b]);
+        if (!bm || !bm[1]) continue;
+        try {
+            var decoded = b64decode(bm[1]);
+            if (!decoded) continue;
+            addDebug("Cadena Base64 encontrada.");
+            var decodedMedia = findDirectMedia(decoded);
+            if (decodedMedia) {
+                addDebug("FUENTE ENCONTRADA DESPUÉS DE BASE64: " + decodedMedia);
+                return decodedMedia;
+            }
+        } catch (e) {
+            addDebug("Error decodificando Base64: " + String(e));
+        }
+    }
+
+    // NIVEL 4 y 5: Diagnóstico
+    if (html.indexOf("Redirecting") !== -1 || html.indexOf("redirecting") !== -1) {
+        addDebug("REDIRECCIÓN DETECTADA en el HTML.");
+    }
+    if (html.indexOf("Loading...") !== -1 || html.indexOf("<title>Loading") !== -1) {
+        addDebug("PÁGINA DE CARGA DETECTADA en el HTML.");
     }
 
     addDebug("No se encontró patrón m3u8/mp4 válido.");
