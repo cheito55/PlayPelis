@@ -1,7 +1,6 @@
-// PlayPelis GrayJay Source v36 - Extractor VidHideFast simple y robusto
+// PlayPelis GrayJay Source v37 - Extractor ultra-simple VidHideFast
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-
 var PPID = null;
 var _settings = {};
 var IPTV_URL = "https://plpro.org";
@@ -15,10 +14,6 @@ function httpGet(url, headers) {
     try { var h = headers || {}; if (!h["User-Agent"] && !h["user-agent"]) h["User-Agent"] = UA; var r = http.GET(url, h); return (r && r.body) ? r.body : ""; }
     catch (e) { return ""; }
 }
-
-// =========================================================
-// HELPERS
-// =========================================================
 function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
 function slugToTitle(s) { return String(s || "").replace(/-/g, " ").replace(/\b\w/g, function(c) { return c.toUpperCase(); }); }
 function htmlDecode(s) {
@@ -50,41 +45,28 @@ function getHost(url) {
 }
 
 // =========================================================
-// EXTRACTOR VidHideFast / Callistanise
-//
-// Enfoque SIMPLE: buscar URLs ofuscadas directamente en el
-// HTML sin desempaquetar el eval. El HTML contiene cadenas
-// tipo "1n://6w.d9/..." que decodificamos con el key array.
+// EXTRACTOR VidHideFast
+// Reemplaza dominio → busca .split('|') → decodifica URLs
 // =========================================================
-function vidhideExtract(pageUrl, referer) {
-    var ref = referer || pageUrl;
+function vidhideExtract(pageUrl) {
     try {
-        // VidHideFast redirige a callistanise.com (301)
-        // GrayJay no sigue redirects, así que reemplazamos el dominio
         var fetchUrl = pageUrl;
-        if (fetchUrl.indexOf("vidhidefast.com") !== -1) {
-            fetchUrl = fetchUrl.replace("vidhidefast.com", "callistanise.com");
-        }
-        if (fetchUrl.indexOf("vidhide.com") !== -1) {
-            fetchUrl = fetchUrl.replace("vidhide.com", "callistanise.com");
-        }
-        var html = httpGet(fetchUrl, { "User-Agent": UA, "Referer": ref, "Origin": "https://" + getHost(fetchUrl) });
+        if (fetchUrl.indexOf("vidhidefast.com") !== -1) fetchUrl = fetchUrl.replace("vidhidefast.com", "callistanise.com");
+        if (fetchUrl.indexOf("vidhide.com") !== -1 && fetchUrl.indexOf("callistanise") === -1) fetchUrl = fetchUrl.replace("vidhide.com", "callistanise.com");
+
+        var html = httpGet(fetchUrl, { "User-Agent": UA });
         if (!html || html.length < 500) return null;
 
-        // 1. Extraer el key array del packed code
         var splitIdx = html.lastIndexOf(".split('|')");
         if (splitIdx === -1) return null;
 
         var keyEnd = html.lastIndexOf("'", splitIdx);
         var keyStart = html.lastIndexOf("'", keyEnd - 1) + 1;
-        if (keyStart <= 0 || keyEnd <= keyStart) return null;
         var key = html.substring(keyStart, keyEnd);
         var keyArr = key.split("|");
-        if (keyArr.length < 100) return null;
+        if (keyArr.length < 50) return null;
 
-        // 2. Función de decodificación
         function decode(str) {
-            if (!str) return str;
             return str.replace(/[a-z0-9]+/g, function(token) {
                 var val = parseInt(token, 36);
                 if (!isNaN(val) && val > 0 && val < keyArr.length && keyArr[val] && keyArr[val].length > 1) return keyArr[val];
@@ -92,84 +74,49 @@ function vidhideExtract(pageUrl, referer) {
             });
         }
 
-        // 3. Buscar todas las cadenas ofuscadas que contienen "://"
-        var obfUrls = html.match(/["'][a-z0-9]+:\/\/[^"']+["']/gi) || [];
-        var candidates = [];
-
-        for (var i = 0; i < obfUrls.length; i++) {
-            var raw = obfUrls[i].substring(1, obfUrls[i].length - 1);
-            var decoded = decode(raw);
-
-            // Solo URLs de streaming (hls, m3u8, master)
-            if (decoded.indexOf("master.") !== -1 && (decoded.indexOf(".txt") !== -1 || decoded.indexOf(".m3u8") !== -1)) {
-                candidates.push(decoded);
-            }
+        var urls = html.match(/["'][a-z0-9]+:\/\/[^"']+["']/gi) || [];
+        var best = null;
+        for (var i = 0; i < urls.length; i++) {
+            var raw = urls[i].substring(1, urls[i].length - 1);
+            var dec = decode(raw);
+            if (dec.indexOf("master.") !== -1 && dec.indexOf(".txt") !== -1) { best = dec; break; }
+            if (!best && dec.indexOf("master.") !== -1 && dec.indexOf(".m3u8") !== -1) best = dec;
         }
 
-        // 4. Intentar cada candidata (.txt primero)
-        candidates.sort(function(a, b) {
-            if (a.indexOf(".txt") !== -1 && b.indexOf(".m3u8") !== -1) return -1;
-            if (a.indexOf(".m3u8") !== -1 && b.indexOf(".txt") !== -1) return 1;
-            return 0;
-        });
+        if (!best) return null;
 
-        for (var j = 0; j < candidates.length; j++) {
-            try {
-                var test = httpGet(candidates[j], { "User-Agent": UA, "Referer": ref });
-                if (test && test.indexOf("#EXTM3U") !== -1) return candidates[j];
-            } catch (e) {}
-        }
-
+        var test = httpGet(best, { "User-Agent": UA });
+        if (test && test.indexOf("#EXTM3U") !== -1) return best;
         return null;
     } catch (e) { return null; }
 }
 
-// =========================================================
-// EXTRACTOR GENÉRICO
-// =========================================================
-function genericExtract(pageUrl, referer) {
-    var ref = referer || pageUrl;
+function genericExtract(pageUrl) {
     try {
-        var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": ref });
+        var html = httpGet(pageUrl, { "User-Agent": UA });
         if (!html) return null;
-        var pats = [
-            /file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
-            /source\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/,
-            /src\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/
-        ];
-        for (var i = 0; i < pats.length; i++) {
-            var m = html.match(pats[i]);
-            if (m && m[1]) return m[1];
-        }
-        var m2 = html.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
-        if (m2) return m2[0];
+        var m = html.match(/file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
+        if (m && m[1]) return m[1];
+        m = html.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
+        if (m) return m[0];
         return null;
     } catch (e) { return null; }
 }
 
-// =========================================================
-// EXTRACTOR UNIFICADO
-// =========================================================
 function extractVideo(pageUrl) {
     var host = getHost(pageUrl);
-    if (host.indexOf("vidhide") !== -1 || host.indexOf("callistanise") !== -1) {
-        return vidhideExtract(pageUrl);
-    }
+    if (host.indexOf("vidhide") !== -1 || host.indexOf("callistanise") !== -1) return vidhideExtract(pageUrl);
     return genericExtract(pageUrl);
 }
 
 // =========================================================
-// GRAYJAY MODELS
+// MODELS
 // =========================================================
 function mkThumb(url) { if (!url) return new Thumbnails([]); return new Thumbnails([new Thumbnail(url, 100)]); }
 function mkVideo(id, title, thumb, url, authorName) {
     initPlatformID();
-    return new PlatformVideo({
-        id: new PlatformID("PlayPelis", String(id), PID),
-        name: title || "Sin titulo", thumbnails: mkThumb(thumb),
-        author: new PlatformAuthorLink(PPID, authorName || "PlayPelis", "https://playpelis.app"),
-        uploadDate: 0, url: url, duration: -1, viewCount: -1, isLive: false
-    });
+    return new PlatformVideo({ id: new PlatformID("PlayPelis", String(id), PID), name: title || "Sin titulo", thumbnails: mkThumb(thumb),
+        author: new PlatformAuthorLink(PPID, authorName || "PlayPelis", "https://playpelis.app"), uploadDate: 0, url: url, duration: -1, viewCount: -1, isLive: false });
 }
 function mkHls(url, name) { if (!url) return null; return new HLSSource({ name: name || "HLS", url: url, duration: 0 }); }
 function mkSrc(sources) {
@@ -181,12 +128,9 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
     var valid = []; var src = videoSources || [];
     for (var i = 0; i < src.length; i++) { if (src[i]) valid.push(src[i]); }
     try {
-        return new PlatformVideoDetails({
-            id: new PlatformID("PlayPelis", String(id), PID), name: name || "Sin titulo",
+        return new PlatformVideoDetails({ id: new PlatformID("PlayPelis", String(id), PID), name: name || "Sin titulo",
             thumbnails: mkThumb(thumb), author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app"),
-            uploadDate: 0, url: url, duration: -1, viewCount: -1, isLive: false,
-            video: mkSrc(valid), description: description || ""
-        });
+            uploadDate: 0, url: url, duration: -1, viewCount: -1, isLive: false, video: mkSrc(valid), description: description || "" });
     } catch (e) { return null; }
 }
 
@@ -207,10 +151,7 @@ function jkaSearch(query) {
         if (directHtml && directHtml.indexOf("404") === -1 && directHtml.indexOf("no encontrada") === -1) {
             var exists = false;
             for (var i = 0; i < out.length; i++) { if (out[i].url === directUrl) { exists = true; break; } }
-            if (!exists) {
-                var im = directHtml.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
-                out.unshift({ title: slugToTitle(slug), url: directUrl, thumb: im ? im[1] : "" });
-            }
+            if (!exists) { var im = directHtml.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i); out.unshift({ title: slugToTitle(slug), url: directUrl, thumb: im ? im[1] : "" }); }
         }
     } catch (e) {}
     return out;
@@ -273,37 +214,23 @@ function ppGet(path) {
 }
 function ppHome() {
     var videos = [];
-    try {
-        var data = ppGet("/movies/resume");
-        if (!data || !data.movies) return videos;
-        for (var i = 0; i < data.movies.length && i < 40; i++) {
-            var m = data.movies[i];
-            if (m.b) videos.push(mkVideo("pp_m_" + m.a, (m.l ? "[" + m.l + "] " : "") + m.b + (m.f ? " (" + m.f + ")" : ""), fixImg(m.d) || fixImg(m.c) || "", "pp://movie/" + m.a, "PlayPelis"));
-        }
-    } catch (e) {}
-    return videos;
+    try { var data = ppGet("/movies/resume"); if (!data || !data.movies) return videos;
+        for (var i = 0; i < data.movies.length && i < 40; i++) { var m = data.movies[i]; if (m.b) videos.push(mkVideo("pp_m_" + m.a, (m.l ? "[" + m.l + "] " : "") + m.b + (m.f ? " (" + m.f + ")" : ""), fixImg(m.d) || fixImg(m.c) || "", "pp://movie/" + m.a, "PlayPelis")); }
+    } catch (e) {} return videos;
 }
 function ppSearch(query) {
     var videos = []; var q = String(query || "").toLowerCase();
-    try {
-        var data = ppGet("/movies/resume");
-        if (data && data.movies) {
-            for (var i = 0; i < data.movies.length && videos.length < 30; i++) {
-                var m = data.movies[i];
-                if (String(m.b || "").toLowerCase().indexOf(q) !== -1 || String(m.i || "").toLowerCase().indexOf(q) !== -1)
-                    videos.push(mkVideo("pp_m_" + m.a, (m.l ? "[" + m.l + "] " : "") + m.b + (m.f ? " (" + m.f + ")" : ""), fixImg(m.d) || fixImg(m.c) || "", "pp://movie/" + m.a, "PlayPelis"));
-            }
-        }
+    try { var data = ppGet("/movies/resume");
+        if (data && data.movies) { for (var i = 0; i < data.movies.length && videos.length < 30; i++) { var m = data.movies[i];
+            if (String(m.b || "").toLowerCase().indexOf(q) !== -1 || String(m.i || "").toLowerCase().indexOf(q) !== -1)
+                videos.push(mkVideo("pp_m_" + m.a, (m.l ? "[" + m.l + "] " : "") + m.b + (m.f ? " (" + m.f + ")" : ""), fixImg(m.d) || fixImg(m.c) || "", "pp://movie/" + m.a, "PlayPelis"));
+        }}
         var sdata = ppGet("/series");
-        if (sdata && sdata.series) {
-            for (var j = 0; j < sdata.series.length && videos.length < 60; j++) {
-                var s = sdata.series[j];
-                if (String(s.b || "").toLowerCase().indexOf(q) !== -1 || String(s.i || "").toLowerCase().indexOf(q) !== -1)
-                    videos.push(mkVideo("pp_s_" + s.a, "[Serie] " + s.b, fixImg(s.d) || fixImg(s.c) || "", "pp://serie/" + s.a, "PlayPelis"));
-            }
-        }
-    } catch (e) {}
-    return videos;
+        if (sdata && sdata.series) { for (var j = 0; j < sdata.series.length && videos.length < 60; j++) { var s = sdata.series[j];
+            if (String(s.b || "").toLowerCase().indexOf(q) !== -1 || String(s.i || "").toLowerCase().indexOf(q) !== -1)
+                videos.push(mkVideo("pp_s_" + s.a, "[Serie] " + s.b, fixImg(s.d) || fixImg(s.c) || "", "pp://serie/" + s.a, "PlayPelis"));
+        }}
+    } catch (e) {} return videos;
 }
 function ppMovieDetails(id) {
     try {
@@ -331,11 +258,9 @@ function ppSerieDetails(id) {
         var title = data.name || ""; var thumb = TMDB_IMG + "/" + (data.backdrop || data.poster || "").replace(/^\//, "");
         var overview = data.overview || ""; var seasons = data.seasonList || [];
         var desc = overview + "\n\n--- Temporadas y Episodios ---";
-        for (var si = 0; si < seasons.length; si++) {
-            var season = seasons[si]; var episodes = season.episodes || [];
+        for (var si = 0; si < seasons.length; si++) { var season = seasons[si]; var episodes = season.episodes || [];
             desc += "\n\nTemporada " + season.num + " (" + episodes.length + " eps)";
-            for (var ei = 0; ei < episodes.length; ei++)
-                desc += "\n  Ep " + episodes[ei].episode + " → pp://serie/" + id + "/" + season.num + "/" + episodes[ei].episode;
+            for (var ei = 0; ei < episodes.length; ei++) desc += "\n  Ep " + episodes[ei].episode + " → pp://serie/" + id + "/" + season.num + "/" + episodes[ei].episode;
         }
         return mkDetail("pp_s_" + id, title, thumb, "pp://serie/" + id, [], desc);
     } catch (e) { return mkDetail("pp_s_" + id, "Error", "", "pp://serie/" + id, [], String(e)); }
@@ -348,14 +273,11 @@ function ppEpisodeLinks(id, season, episode) {
         var thumb = TMDB_IMG + "/" + (data.poster || "").replace(/^\//, "");
         var linksData = ppGet("/series/" + id + "/links/" + season + "/" + episode);
         var desc = title + "\n\n--- Servidores ---"; var sources = [];
-        if (linksData && linksData.length) {
-            for (var i = 0; i < linksData.length; i++) {
-                var link = linksData[i]; var linkUrl = link.a || "";
-                desc += "\n" + (link.b || "srv") + " [" + (link.c || "") + "] → " + linkUrl;
-                var videoUrl = extractVideo(linkUrl);
-                if (videoUrl) { var src = mkHls(videoUrl, (link.b || "") + " " + (link.c || "")); if (src) sources.push(src); }
-            }
-        }
+        if (linksData && linksData.length) { for (var i = 0; i < linksData.length; i++) { var link = linksData[i]; var linkUrl = link.a || "";
+            desc += "\n" + (link.b || "srv") + " [" + (link.c || "") + "] → " + linkUrl;
+            var videoUrl = extractVideo(linkUrl);
+            if (videoUrl) { var src = mkHls(videoUrl, (link.b || "") + " " + (link.c || "")); if (src) sources.push(src); }
+        }}
         var epNum = parseInt(episode, 10);
         if (epNum > 1) desc += "\n\n← Ep Anterior: pp://serie/" + id + "/" + season + "/" + (epNum - 1);
         desc += "\n→ Ep Siguiente: pp://serie/" + id + "/" + season + "/" + (epNum + 1);
@@ -387,11 +309,9 @@ function doHome() {
     try { var r = ppHome(); for (var i = 0; i < r.length; i++) videos.push(r[i]); } catch (e) {}
     try {
         var jkHtml = httpGet(JK + "/", { "Referer": JK + "/" });
-        if (jkHtml) {
-            var re = /data-setbg="([^"]*)"[^>]*>[\s\S]*?<h2[^>]*>([\s\S]*?)<\/h2>/gi; var m;
+        if (jkHtml) { var re = /data-setbg="([^"]*)"[^>]*>[\s\S]*?<h2[^>]*>([\s\S]*?)<\/h2>/gi; var m;
             while ((m = re.exec(jkHtml)) && videos.length < 60) {
-                var linkRe = /href="(https?:\/\/jkanime\.net\/[a-z0-9-]+\/?)"/i;
-                var pos = jkHtml.indexOf(m[0]);
+                var linkRe = /href="(https?:\/\/jkanime\.net\/[a-z0-9-]+\/?)"/i; var pos = jkHtml.indexOf(m[0]);
                 var lm = jkHtml.substring(Math.max(0, pos - 500), pos + m[0].length).match(linkRe);
                 videos.push(mkVideo("jk_home_" + (lm ? lm[1] : JK + "/"), "[Anime] " + stripTags(m[2]), m[1], lm ? lm[1] : JK + "/", "JkAnime"));
             }
@@ -401,7 +321,7 @@ function doHome() {
 }
 
 // =========================================================
-// GRAYJAY BINDINGS
+// BINDINGS
 // =========================================================
 if (typeof source !== "undefined") {
     source.setSettings = function(s) { _settings = s || {}; };
