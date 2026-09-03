@@ -2,10 +2,19 @@
     "name": "PlayPelis",
     "description": "Extractor unificado para PlayPelis y JkAnime",
     "author": "PlayPelis",
-    "version": 35,
-    "id": "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40",
+    "authorUrl": "https://playpelis.app",
+    "sourceUrl": "http://127.0.0.1:3000/PlayPelisConfig.json",
+    "repositoryUrl": "",
     "scriptUrl": "PlayPelis.js",
     "iconUrl": "https://image.tmdb.org/t/p/w500/wwemzKWzjKYJFfCeiB57q3r4Bcm.png",
+    "version": 34,
+    "id": "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40",
+    "scriptSignature": "",
+    "scriptPublicKey": "",
+    "packages": [
+        "Http"
+    ],
+    "allowEval": false,
     "allowUrls": [
         "https://jkanime.net",
         "https://*.jkanime.net",
