@@ -31,6 +31,7 @@ function httpGet(url, headers) {
         var r = http.GET(url, h);
         return (r && r.body) ? r.body : "";
     } catch (e) {
+        console.log("HTTP Error: " + String(e));
         return "";
     }
 }
@@ -174,7 +175,17 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
 // =========================================================
 function tryExtractM3u8(pageUrl) {
     var html = httpGet(pageUrl, { "User-Agent": UA, "Referer": pageUrl });
-    if (!html) return null;
+    if (!html) {
+        console.log("EXTRAER Error: HTML nulo al pedir " + pageUrl);
+        return null;
+    }
+
+    // --- VOLCADO GENÉRICO ---
+    console.log("EXTRAER URL: " + pageUrl);
+    console.log("EXTRAER HTML length: " + html.length);
+    console.log("EXTRAER HTML: " + html.substring(0, 1500));
+    // ------------------------
+
     var host = getHost(pageUrl);
 
     // Voe patterns
@@ -215,6 +226,7 @@ function tryExtractM3u8(pageUrl) {
         } catch (e) {}
     }
 
+    console.log("EXTRAER Info: No se encontró patrón m3u8/mp4 en el código.");
     return null;
 }
 
@@ -568,7 +580,16 @@ function jkaDetails(url) {
 function jkaExtractVideo(episodeUrl) {
     try {
         var html = httpGet(episodeUrl, { "Referer": JK + "/" });
-        if (!html) return null;
+        if (!html) {
+            console.log("JKA Error: HTML nulo al pedir " + episodeUrl);
+            return null;
+        }
+
+        // --- VOLCADO DE PRUEBA ---
+        console.log("JKA URL: " + episodeUrl);
+        console.log("JKA HTML length: " + html.length);
+        console.log("JKA HTML (inicio): " + html.substring(0, 1500));
+        // -------------------------
 
         // Buscar iframe del servidor um (el que da m3u8 directo)
         var re = /video\[\d+\]\s*=\s*'[^']*src="(https?:\/\/jkanime\.net\/jkplayer\/um[^"]*)"/i;
@@ -580,22 +601,36 @@ function jkaExtractVideo(episodeUrl) {
             m = html.match(re);
         }
 
-        if (!m || !m[1]) return null;
+        if (!m || !m[1]) {
+            console.log("JKA Error: No se encontró iframe del jkplayer en el HTML.");
+            return null;
+        }
 
         var playerUrl = m[1].replace(/&amp;/g, "&");
 
         // Cargar la pagina del jkplayer
         var playerHtml = httpGet(playerUrl, { "Referer": episodeUrl });
-        if (!playerHtml) return null;
+        if (!playerHtml) {
+            console.log("PLAYER Error: HTML nulo al pedir " + playerUrl);
+            return null;
+        }
+
+        // --- VOLCADO DE PLAYER ---
+        console.log("PLAYER URL: " + playerUrl);
+        console.log("PLAYER HTML length: " + playerHtml.length);
+        console.log("PLAYER HTML: " + playerHtml.substring(0, 1500));
+        // -------------------------
 
         // Buscar la URL del m3u8
         var m3u8 = playerHtml.match(/url\s*[:=]\s*['"]([^'"]+\.m3u8[^'"]*)['"]/);
         if (m3u8 && m3u8[1]) {
             return mkHls(m3u8[1], "JkAnime");
         }
-
+        
+        console.log("PLAYER Error: No se encontró .m3u8 en el código del reproductor.");
         return null;
     } catch (e) {
+        console.log("JKA Exception: " + String(e));
         return null;
     }
 }
