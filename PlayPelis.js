@@ -49,7 +49,6 @@ function getHost(url) {
 // Reemplaza dominio → busca .split('|') → decodifica URLs
 // =========================================================
 function vidhideExtract(pageUrl) {
-function vidhideExtract(pageUrl) {
     try {
         var fetchUrl = pageUrl;
         if (fetchUrl.indexOf("vidhidefast.com") !== -1) fetchUrl = fetchUrl.replace("vidhidefast.com", "callistanise.com");
