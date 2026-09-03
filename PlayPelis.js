@@ -155,14 +155,12 @@ function tryExtractM3u8(pageUrl) {
 
     var host = getHost(pageUrl).toLowerCase();
 
-    // NIVEL 1: Buscar video directo
     var direct = findDirectMedia(html);
     if (direct) {
         addDebug("FUENTE DIRECTA ENCONTRADA: " + direct);
         return direct;
     }
 
-    // NIVEL 2: Buscar en configuraciones comunes
     var patterns = [
         /["']file["']\s*:\s*["']([^"']+)["']/i,
         /["']src["']\s*:\s*["']([^"']+)["']/i,
@@ -182,7 +180,6 @@ function tryExtractM3u8(pageUrl) {
         }
     }
 
-    // NIVEL 3: Base64 simple
     var base64Patterns = [
         /atob\(\s*['"]([^'"]+)['"]\s*\)/i,
         /base64\s*[:=]\s*['"]([^'"]+)['"]/i
@@ -205,7 +202,6 @@ function tryExtractM3u8(pageUrl) {
         }
     }
 
-    // NIVEL 4 y 5: Diagnóstico
     if (html.indexOf("Redirecting") !== -1 || html.indexOf("redirecting") !== -1) {
         addDebug("REDIRECCIÓN DETECTADA en el HTML.");
     }
