@@ -1,67 +1,59 @@
 /*
- * GrayJay - XuperTv API Source FINAL
+ * GrayJay - XuperTv API Source (FUSIÓN FINAL)
  *
  * Reconstrucción basada en el APK XuperTv N0F4C3 v4.34.7.
+ * Verificado contra smali_classes3/db/y1.smali y los beans de
+ * mobile/com/requestframe/utils/bean y .../response.
  *
- * CONFIRMADO EN EL DEX:
- *   POST /api/portalCore/v10/startPlayVOD
- *   POST /api/portalCore/blSearchByName
- *   POST /api/portalCore/blSearchByContent
- *   POST /api/portalCore/v4/getItemData
- *   POST /api/portalCore/v3/getColumnContents
- *   POST /api/portalCore/getHome
- *   POST /api/portalCore/v9/getAuthInfo
- *   POST /api/portalCore/v14/getSlbInfo
- *   POST /api/portalCore/v15/getSlbInfo
+ * Esta es la versión definitiva: parte de la base "v2 DEX-CONFIRMED"
+ * (endpoints y beans verificados directamente contra el smali, incluyendo
+ * descubrimiento dinámico de servidores SLB y navegación por columnas/canales)
+ * e incorpora el único elemento útil de la variante "FINAL" que faltaba aquí:
+ * el campo macAddr en GetItemDataBean.
  *
- * StartPlayVODBean confirmado:
- *   userToken
- *   userId
- *   portalCode
- *   columnId
- *   contentId
- *   seriesContentId
- *   type
- *   startTime
- *   authType
- *   episodeNumberList
+ * ENDPOINTS CONFIRMADOS (db/y1.smali):
+ *   POST api/portalCore/v10/startPlayVOD      -> StartPlayVODResult
+ *   POST api/portalCore/v3/searchByName       -> SearchByNameResult   (NO existe blSearchByName)
+ *   POST api/portalCore/blSearchByContent     -> SearchByContentData  (buscar por contentId, no por texto)
+ *   POST api/portalCore/v3/searchByContent    -> SearchByContentData
+ *   POST api/portalCore/v4/getItemData        -> GetItemDataResult
+ *   POST api/portalCore/v3/getColumnContents  -> GetColumnContentsResult (subcolumnas)
+ *   POST api/portalCore/v3/getShelveData      -> ShelveDataBean (assetList/channelList reales de una columna)
+ *   POST api/portalCore/getHome               -> GetHomeResult
+ *   POST api/portalCore/v9/getAuthInfo        -> GetAuthInfoResult
+ *   POST api/portalCore/v15/getSlbInfo        -> GetSlbInfoBeanResult (NO existe v14)
+ *   POST api/portalCore/config/get            -> ConfigResult
  *
- * StartPlayVODResult confirmado:
- *   returnCode
- *   errorMessage
- *   data.episodeList[]
+ * BEANS DE PETICIÓN CONFIRMADOS:
+ *   SearchByNameBean    : userToken, userId, portalCode, columnId(Integer),
+ *                         value, type, pageSize(Integer), pageNum(Integer), filter
+ *   GetSlbInfoBean      : appParams, appVer, encMediaSupported(int), hasPay, lang,
+ *                         liveCodeList(List), pipFlag, portalCode, reserve1, type,
+ *                         userId, userIdentity, userToken
+ *   GetHomeBean         : freeVersion, freeVodCode, homePageCode, portalCode,
+ *                         userId, userToken, version
+ *   GetItemDataBean     : contentId, language, macAddr, portalCode, sortType, type,
+ *                         userId, userToken
+ *   StartPlayVODBean    : authType, columnId(Integer), contentId, episodeNumberList([I),
+ *                         portalCode, seriesContentId, startTime(int), type, userId, userToken
+ *   GetColumnContentsBean: columnId(Integer), numDisplay, pageNum, pageSize, portalCode,
+ *                         specialFlag, userId, userToken
+ *   ShelveDataRequestBean: columnId(int), columnType, encryptVersion, numDisplay,
+ *                         pageNum, pageSize, portalCode, userId, userToken
  *
- * episodeList item confirmado:
- *   episodeNumber
- *   programContentId
- *   totalMovieList[]
- *
- * totalMovieList item confirmado:
- *   quality
- *   movieList[]
- *
- * MovieList confirmado:
- *   audioInfo
- *   audioType
- *   bitRateType
- *   contentId
- *   encodeFormat
- *   licenseList
- *   quality
- *   screenFormat
- *   terminalType
- *   type
- *   videoFormat
- *   videoType
- *
- * LicenseData confirmado:
- *   license
- *   tag
+ * RESPUESTAS CONFIRMADAS:
+ *   SearchByNameResult.data      -> SearchData { searchItemList: [ SearchItem { itemList: [ SearchShelveItem/AssetData ] } ], totalSize }
+ *   GetHomeResult.data           -> GetHomeData { recommendList: [ HomeRecommend { assetList: [HomeAsset], channelList: [Channel], code, columnId } ] }
+ *   StartPlayVODResult.data      -> StartPlayVODData { episodeList: [ EpisodeList { episodeNumber, programContentId, totalMovieList: [ Movie { licenseList: [LicenseData] } ] } ] }
+ *   GetSlbInfoBeanResult.data    -> GetSlbInfoBeanResultData { cdn_list: [ CdnListBeanResult { main_addr, spared_addr, main_addr_mark, spared_addr_mark, url_list: [CdnUrl] } ] }
+ *   ShelveListData               -> { assetList: [AssetData], channelList: [Channel], slbInfo: SlbInfo { main_slb_addr, spared_slb_addr, ... } }
  *
  * IMPORTANTE:
- * El APK obtiene PORTAL_MAIN/PORTAL_BACKUP desde DomainCache/DNS/configuración
- * y no deja un dominio público fijo en el DEX. Por eso XUPER_PORTAL_BASE_URL
- * se deja configurable y NO se inventa un servidor.
+ * El APK obtiene PORTAL_MAIN/PORTAL_BACKUP en runtime (DomainCache + DoH dns.google.com)
+ * y no deja un dominio público fijo en el DEX. Por eso portal_base_url es configurable
+ * y NO se inventa un servidor. Si tienes una URL capturada (por ejemplo de getHome
+ * o getSlbInfo de tu app funcionando), pégala en portal_base_url y el plugin
+ * resolverá lo demás vía v15/getSlbInfo.
  */
 
 const PLATFORM_NAME = "XuperTv";
@@ -84,6 +76,15 @@ const REQUEST_TIMEOUT_MS = 15000;
 
 let _config = {};
 let _settings = {};
+
+// Descubrimiento dinámico de servidores XuperTv (SLB).
+// Se mantiene separado del portal configurado para conservar el fallback.
+let _slbDiscoveryAttempted = false;
+let _discoveredMain = "";
+let _discoveredBackup = "";
+let _discoveredMainToken = "";
+let _discoveredBackupToken = "";
+
 
 function dbg(msg) {
     try {
@@ -157,6 +158,7 @@ function getSetting(name, fallback) {
 
 function portalBase() {
     const v = firstNonEmpty(
+        _discoveredMain,
         getSetting("portal_base_url", ""),
         getSetting("portalBaseUrl", ""),
         DEFAULT_PORTAL_BASE_URL
@@ -171,6 +173,7 @@ function portalBase() {
 
 function backupBase() {
     const v = firstNonEmpty(
+        _discoveredBackup,
         getSetting("portal_backup_url", ""),
         getSetting("portalBackupUrl", ""),
         DEFAULT_BACKUP_BASE_URL
@@ -212,6 +215,13 @@ function authType() {
         getSetting("auth_type", ""),
         getSetting("authType", ""),
         DEFAULT_AUTH_TYPE
+    );
+}
+
+function macAddr() {
+    return firstNonEmpty(
+        getSetting("mac_addr", ""),
+        getSetting("macAddr", "")
     );
 }
 
@@ -283,33 +293,403 @@ function httpPostJson(url, body, extraHeaders) {
     );
 }
 
-function postWithBackup(path, body) {
-    const main = portalBase();
-    const backup = backupBase();
 
-    let firstError = null;
+/* ============================================================
+ * XuperTv SLB / server discovery
+ *
+ * RECONSTRUIDO DESDE EL APK v4.34.7:
+ * GetSlbInfoBean contiene estos campos en la petición:
+ *   appParams, appVer, hasPay, userIdentity, portalCode, type,
+ *   lang, pipFlag, encMediaSupported, liveCodeList, reserve1,
+ *   userId, userToken.
+ *
+ * Confirmado en db/y1.smali: solo existe /v15/getSlbInfo (no hay v14).
+ * La respuesta real es GetSlbInfoBeanResult.data.cdn_list[] con:
+ *   main_addr, spared_addr, main_addr_mark, spared_addr_mark, url_list[].
+ * El objeto SlbInfo (main_slb_addr/spared_slb_addr) aparece dentro de
+ * ShelveListData (respuesta de v3/getShelveData) y también se parsea.
+ *
+ * No se inventa una firma ni se usa el token como query/header sin
+ * evidencia. Los tokens se conservan solamente para diagnóstico/futuras
+ * mejoras del flujo que los necesiten.
+ * ============================================================ */
 
-    if (main) {
+function resetSlbDiscovery() {
+    _slbDiscoveryAttempted = false;
+    _discoveredMain = "";
+    _discoveredBackup = "";
+    _discoveredMainToken = "";
+    _discoveredBackupToken = "";
+}
+
+function normalizeServerAddress(value) {
+    if (!nonEmpty(value)) return "";
+
+    let s = String(value).trim();
+    if (!s) return "";
+
+    // Algunos backends pueden devolver JSON/string escapado.
+    try {
+        if ((s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') ||
+            (s.charAt(0) === "'" && s.charAt(s.length - 1) === "'")) {
+            s = s.substring(1, s.length - 1);
+        }
+    } catch (_) {}
+
+    s = s.replace(/\\\//g, "/").trim();
+
+    if (!/^https?:\/\//i.test(s)) {
+        s = "https://" + s.replace(/^\/\//, "");
+    }
+
+    // El SLB puede devolver host, host:puerto o una URL con path.
+    // No eliminamos un path útil salvo cuando claramente es otro endpoint API.
+    s = s.replace(/\/+$/, "");
+    s = s.replace(/\/api\/portalCore\/.*$/i, "");
+
+    try {
+        // Validación básica de URL. No se usa URL() para maximizar
+        // compatibilidad con el runtime JS de GrayJay.
+        if (!/^https?:\/\/[^\s/]+(?::\d+)?(?:\/.*)?$/i.test(s)) {
+            return "";
+        }
+    } catch (_) {}
+
+    return s;
+}
+
+function slbAppParams() {
+    // La APK construye appParams como JSON y al menos incluye deviceTag.
+    // Permitimos además un valor explícito si el usuario/runtime lo conoce.
+    const explicit = firstNonEmpty(
+        getSetting("slb_app_params", ""),
+        getSetting("app_params", ""),
+        getSetting("appParams", "")
+    );
+    if (explicit) return explicit;
+
+    const deviceTag = firstNonEmpty(
+        getSetting("device_tag", ""),
+        getSetting("deviceTag", "")
+    );
+
+    try {
+        return JSON.stringify({
+            deviceTag: deviceTag
+        });
+    } catch (_) {
+        return '{"deviceTag":""}';
+    }
+}
+
+function slbLiveCodeList() {
+    const value = getSetting("live_code_list", getSetting("liveCodeList", null));
+
+    if (Array.isArray(value)) return value;
+
+    if (nonEmpty(value)) {
+        const parsed = safeJson(value);
+        if (Array.isArray(parsed)) return parsed;
+
+        return String(value)
+            .split(",")
+            .map(function(v) { return String(v).trim(); })
+            .filter(function(v) { return v !== ""; });
+    }
+
+    return [];
+}
+
+function buildGetSlbInfoBody() {
+    return {
+        appParams: slbAppParams(),
+        appVer: firstNonEmpty(
+            getSetting("app_ver", ""),
+            getSetting("appVer", ""),
+            getSetting("version", ""),
+            DEFAULT_VERSION
+        ),
+        hasPay: firstNonEmpty(
+            getSetting("has_pay", ""),
+            getSetting("hasPay", "")
+        ),
+        userIdentity: firstNonEmpty(
+            getSetting("user_identity", ""),
+            getSetting("userIdentity", "")
+        ),
+        portalCode: portalCode(),
+        type: firstNonEmpty(
+            getSetting("slb_type", ""),
+            getSetting("type", "")
+        ),
+        lang: firstNonEmpty(
+            getSetting("lang", ""),
+            getSetting("language", ""),
+            ""
+        ),
+        pipFlag: firstNonEmpty(
+            getSetting("pip_flag", ""),
+            getSetting("pipFlag", "")
+        ),
+        encMediaSupported: numberOr(
+            getSetting("enc_media_supported", getSetting("encMediaSupported", 0)),
+            0
+        ),
+        liveCodeList: slbLiveCodeList(),
+        reserve1: firstNonEmpty(
+            getSetting("reserve1", ""),
+            getSetting("slb_reserve1", "")
+        ),
+        userId: userId(),
+        userToken: userToken()
+    };
+}
+
+function collectSlbInfo(value, out, depth, seen) {
+    if (value == null || depth > 12 || !out) return;
+
+    if (typeof value === "string") {
+        const parsed = safeJson(value);
+        if (parsed) collectSlbInfo(parsed, out, depth + 1, seen);
+        return;
+    }
+
+    if (typeof value !== "object") return;
+
+    if (seen) {
         try {
-            return httpPostJson(apiUrl(main, path), body);
-        } catch (e) {
-            firstError = e;
-            dbg("Main falló: " + e);
+            if (seen.indexOf(value) >= 0) return;
+            seen.push(value);
+        } catch (_) {}
+    }
+
+    // SlbInfo (viene en ShelveListData): main_slb_addr / spared_slb_addr
+    const main = firstNonEmpty(
+        value.main_slb_addr,
+        value.mainSlbAddr,
+        value.main_slb_address,
+        value.mainSlbAddress
+    );
+
+    const mainToken = firstNonEmpty(
+        value.main_slb_token,
+        value.mainSlbToken
+    );
+
+    const backup = firstNonEmpty(
+        value.spared_slb_addr,
+        value.sparedSlbAddr,
+        value.spare_slb_addr,
+        value.spareSlbAddr,
+        value.spared_addr,
+        value.sparedAddr
+    );
+
+    const backupToken = firstNonEmpty(
+        value.spared_slb_token,
+        value.sparedSlbToken,
+        value.spare_slb_token,
+        value.spareSlbToken
+    );
+
+    if (main || backup) {
+        if (!out.main && main) out.main = normalizeServerAddress(main);
+        if (!out.backup && backup) out.backup = normalizeServerAddress(backup);
+        if (!out.mainToken && mainToken) out.mainToken = String(mainToken);
+        if (!out.backupToken && backupToken) out.backupToken = String(backupToken);
+    }
+
+    // GetSlbInfoBeanResultData.cdn_list[] (CdnListBeanResult):
+    //   main_addr, spared_addr, main_addr_mark, spared_addr_mark, url_list[]
+    if (!out.main && value.main_addr) {
+        const m = normalizeServerAddress(value.main_addr);
+        if (m) {
+            out.main = m;
+            const mark = firstNonEmpty(value.main_addr_mark, value.mainAddrMark);
+            if (mark) out.mainToken = String(mark);
+        }
+    }
+    if (!out.backup && value.spared_addr) {
+        const b = normalizeServerAddress(value.spared_addr);
+        if (b) {
+            out.backup = b;
+            const mark = firstNonEmpty(value.spared_addr_mark, value.sparedAddrMark);
+            if (mark) out.backupToken = String(mark);
         }
     }
 
-    if (backup && backup !== main) {
+    // url_list[] (CdnUrl { url, tag }): primer url utilizable como main
+    if (Array.isArray(value.url_list) && !out.main) {
+        for (let i = 0; i < value.url_list.length && !out.main; i++) {
+            const u = value.url_list[i];
+            const cand = firstNonEmpty(
+                u && (u.url || u.main_url || u.address || u.host),
+                typeof u === "string" ? u : ""
+            );
+            const n = normalizeServerAddress(cand);
+            if (n) out.main = n;
+        }
+    }
+
+    const keys = Object.keys(value);
+    for (let i = 0; i < keys.length; i++) {
+        const v = value[keys[i]];
+        if (v && typeof v === "object") {
+            collectSlbInfo(v, out, depth + 1, seen);
+        } else if (typeof v === "string" && /^(?:data|result|response|slb|slbInfo|cdn_list)$/i.test(keys[i])) {
+            collectSlbInfo(v, out, depth + 1, seen);
+        }
+    }
+}
+
+function discoverSlbServers(force) {
+    if (_slbDiscoveryAttempted && !force) {
+        return {
+            main: _discoveredMain,
+            backup: _discoveredBackup,
+            mainToken: _discoveredMainToken,
+            backupToken: _discoveredBackupToken
+        };
+    }
+
+    _slbDiscoveryAttempted = true;
+
+    // Necesitamos al menos un bootstrap. La APK obtiene este primer dominio
+    // desde DomainCache/DNS/configuración; el JS no inventa uno.
+    const bootstrapMain = firstNonEmpty(
+        getSetting("portal_base_url", ""),
+        getSetting("portalBaseUrl", ""),
+        DEFAULT_PORTAL_BASE_URL
+    );
+    const bootstrapBackup = firstNonEmpty(
+        getSetting("portal_backup_url", ""),
+        getSetting("portalBackupUrl", ""),
+        DEFAULT_BACKUP_BASE_URL
+    );
+
+    const bases = [];
+    [bootstrapMain, bootstrapBackup].forEach(function(v) {
+        const n = normalizeServerAddress(v);
+        if (n && bases.indexOf(n) < 0) bases.push(n);
+    });
+
+    if (!bases.length) {
+        dbg("SLB: no hay bootstrap portal_base_url/portal_backup_url");
+        return {
+            main: "",
+            backup: "",
+            mainToken: "",
+            backupToken: ""
+        };
+    }
+
+    const body = buildGetSlbInfoBody();
+    let lastError = null;
+    let result = null;
+    let usedVersion = "";
+
+    for (let b = 0; b < bases.length && !result; b++) {
+        const base = bases[b];
+
+        // Confirmado en db/y1.smali: solo existe api/portalCore/v15/getSlbInfo
+        const versions = ["v15"];
+
+        for (let i = 0; i < versions.length; i++) {
+            const path = "/api/portalCore/" + versions[i] + "/getSlbInfo";
+            try {
+                dbg("SLB " + versions[i] + " -> " + base);
+                result = httpPostJson(apiUrl(base, path), body);
+                usedVersion = versions[i];
+                break;
+            } catch (e) {
+                lastError = e;
+                dbg("SLB " + versions[i] + " falló: " + e);
+            }
+        }
+    }
+
+    if (!result) {
+        dbg("SLB discovery falló: " + (lastError || "sin respuesta"));
+        return {
+            main: "",
+            backup: "",
+            mainToken: "",
+            backupToken: ""
+        };
+    }
+
+    const found = {
+        main: "",
+        backup: "",
+        mainToken: "",
+        backupToken: ""
+    };
+
+    collectSlbInfo(result, found, 0, []);
+
+    _discoveredMain = found.main || "";
+    _discoveredBackup = found.backup || "";
+    _discoveredMainToken = found.mainToken || "";
+    _discoveredBackupToken = found.backupToken || "";
+
+    dbg("SLB " + usedVersion +
+        " main=" + (_discoveredMain ? "yes" : "no") +
+        " backup=" + (_discoveredBackup ? "yes" : "no") +
+        " mainToken=" + (_discoveredMainToken ? "yes" : "no") +
+        " backupToken=" + (_discoveredBackupToken ? "yes" : "no"));
+
+    return found;
+}
+
+function ensureSlbServers() {
+    try {
+        discoverSlbServers(false);
+    } catch (e) {
+        dbg("ensureSlbServers: " + e);
+    }
+}
+
+function postWithBackup(path, body) {
+    // Descubre servidores una sola vez por ciclo de enable().
+    // Si el descubrimiento falla, se conservan los portales configurados.
+    ensureSlbServers();
+
+    const configuredMain = firstNonEmpty(
+        getSetting("portal_base_url", ""),
+        getSetting("portalBaseUrl", ""),
+        DEFAULT_PORTAL_BASE_URL
+    );
+    const configuredBackup = firstNonEmpty(
+        getSetting("portal_backup_url", ""),
+        getSetting("portalBackupUrl", ""),
+        DEFAULT_BACKUP_BASE_URL
+    );
+
+    const candidates = [];
+    [
+        _discoveredMain,
+        _discoveredBackup,
+        configuredMain,
+        configuredBackup
+    ].forEach(function(v) {
+        const n = normalizeServerAddress(v);
+        if (n && candidates.indexOf(n) < 0) candidates.push(n);
+    });
+
+    let firstError = null;
+
+    for (let i = 0; i < candidates.length; i++) {
         try {
-            return httpPostJson(apiUrl(backup, path), body);
+            return httpPostJson(apiUrl(candidates[i], path), body);
         } catch (e) {
             firstError = firstError || e;
-            dbg("Backup falló: " + e);
+            dbg("Servidor " + (i + 1) + " falló: " + e);
         }
     }
 
     throw firstError || new ScriptException(
         "XuperTv",
-        "No hay servidor PORTAL_MAIN/PORTAL_BACKUP configurado."
+        "No se encontró un servidor XuperTv. Configure un portal inicial para permitir el descubrimiento SLB."
     );
 }
 
@@ -630,7 +1010,7 @@ function extractId(value) {
 function extractThumbnail(value) {
     if (!value || typeof value !== "object") return "";
 
-    return firstNonEmpty(
+    const direct = firstNonEmpty(
         value.thumbnail,
         value.thumbnailUrl,
         value.image,
@@ -642,6 +1022,36 @@ function extractThumbnail(value) {
         value.pic,
         value.picUrl
     );
+    if (direct) return direct;
+
+    // posterList es List<PosterList/Poster> con fileUrl (confirmado en el DEX)
+    const pl = value.posterList;
+    if (pl != null) {
+        if (typeof pl === "string") return pl;
+
+        if (Array.isArray(pl)) {
+            for (let i = 0; i < pl.length; i++) {
+                const item = pl[i];
+
+                if (typeof item === "string" && nonEmpty(item)) {
+                    return item;
+                }
+
+                if (item && typeof item === "object") {
+                    const u = firstNonEmpty(
+                        item.fileUrl,
+                        item.url,
+                        item.posterUrl,
+                        item.imageUrl,
+                        item.src
+                    );
+                    if (u) return u;
+                }
+            }
+        }
+    }
+
+    return "";
 }
 
 function extractDescription(value) {
@@ -793,19 +1203,20 @@ function searchByName(query, page) {
         userToken: userToken(),
         userId: userId(),
         portalCode: portalCode(),
-        columnId: "",
+        columnId: null,
         value: text(query),
         type: firstNonEmpty(
             getSetting("search_type", ""),
             getSetting("searchType", "")
         ),
-        pageSize: SEARCH_PAGE_SIZE,
+        pageSize: numberOr(SEARCH_PAGE_SIZE, 30),
         pageNum: numberOr(page, 1),
         filter: ""
     };
 
+    // Confirmado en db/y1.smali: api/portalCore/v3/searchByName
     return postWithBackup(
-        "/api/portalCore/blSearchByName",
+        "/api/portalCore/v3/searchByName",
         body
     );
 }
@@ -819,7 +1230,8 @@ function getItemData(contentId, type) {
         type: firstNonEmpty(type, ""),
         sortType: "",
         language: "",
-        macAddr: ""
+        // macAddr aparece en GetItemDataBean; se envía si está configurado.
+        macAddr: macAddr()
     };
 
     return postWithBackup(
@@ -844,8 +1256,43 @@ function getColumnContents(columnId, page) {
     );
 }
 
+function getShelveData(columnId, type, page) {
+    const body = {
+        columnId: numberOr(columnId, 0),
+        columnType: firstNonEmpty(type, ""),
+        encryptVersion: numberOr(
+            getSetting("encrypt_version", getSetting("encryptVersion", null)),
+            null
+        ),
+        numDisplay: numberOr(
+            getSetting("num_display", getSetting("numDisplay", null)),
+            null
+        ),
+        pageNum: numberOr(page, 1),
+        pageSize: SEARCH_PAGE_SIZE,
+        portalCode: portalCode(),
+        userId: userId(),
+        userToken: userToken()
+    };
+
+    // Confirmado en db/y1.smali: api/portalCore/v3/getShelveData
+    // Respuesta ShelveDataBean.data = ShelveListData { assetList, channelList, slbInfo, version }
+    return postWithBackup(
+        "/api/portalCore/v3/getShelveData",
+        body
+    );
+}
+
 function getHome() {
     const body = {
+        freeVersion: firstNonEmpty(
+            getSetting("free_version", ""),
+            getSetting("freeVersion", "")
+        ),
+        freeVodCode: firstNonEmpty(
+            getSetting("free_vod_code", ""),
+            getSetting("freeVodCode", "")
+        ),
         userId: userId(),
         userToken: userToken(),
         portalCode: portalCode(),
@@ -1034,19 +1481,36 @@ function detailsFromResolved(contentId, result, sources) {
         viewCount: -1,
         isLive: false,
         description: description,
-        video: new MuxVideoSourceDescriptor({
-            isUnMuxed: false,
-            videoSources: videoSources
-        }),
+        video: muxDescriptor(videoSources),
         dash: null,
         hls: null,
         live: null
     });
 }
 
+function muxDescriptor(videoSources) {
+    const value = {
+        isUnMuxed: false,
+        videoSources: videoSources
+    };
+
+    try {
+        if (typeof MuxVideoSourceDescriptor !== "undefined") {
+            return new MuxVideoSourceDescriptor(value);
+        }
+    } catch (_) {}
+
+    return {
+        plugin_type: "MuxVideoSourceDescriptor",
+        isUnMuxed: false,
+        videoSources: videoSources
+    };
+}
+
 source.enable = function(config) {
     _config = config || {};
     _settings = (_config && _config.settings) || {};
+    resetSlbDiscovery();
 
     dbg("enabled");
 };
@@ -1054,6 +1518,7 @@ source.enable = function(config) {
 source.disable = function() {
     _settings = {};
     _config = {};
+    resetSlbDiscovery();
 };
 
 source.searchSuggestions = function(query) {
@@ -1179,11 +1644,68 @@ source.getSubComments = function(comment) {
 };
 
 source.isChannelUrl = function(url) {
-    return false;
+    // xuper://column/<columnId> — navegación por columnas vía v3/getShelveData
+    return /^xuper:\/\/column\//i.test(text(url));
 };
 
+function parseColumnId(url) {
+    if (!nonEmpty(url)) return "";
+
+    const s = String(url);
+
+    let m = s.match(/^xuper:\/\/column\/([^?#]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]);
+
+    m = s.match(/[?&]columnId=([^&#]+)/i);
+    if (m && m[1]) return decodeURIComponent(m[1]);
+
+    return "";
+}
+
 source.getChannel = function(url) {
-    return null;
+    const columnId = parseColumnId(url);
+
+    if (!columnId) {
+        throw new ScriptException(
+            "XuperTv",
+            "No se pudo identificar columnId en la URL."
+        );
+    }
+
+    let name = "Columna " + columnId;
+
+    const q = /[?&]name=([^&#]+)/i.exec(String(url));
+    if (q && q[1]) {
+        try {
+            name = decodeURIComponent(q[1]);
+        } catch (_) {
+            name = q[1];
+        }
+    }
+
+    try {
+        return new Channel({
+            id: new PlatformID(
+                PLATFORM_NAME,
+                "column:" + columnId,
+                PLUGIN_ID
+            ),
+            name: name,
+            url: "xuper://column/" + encodeURIComponent(columnId),
+            avatarUrl: ""
+        });
+    } catch (_) {
+        return {
+            id: new PlatformID(
+                PLATFORM_NAME,
+                "column:" + columnId,
+                PLUGIN_ID
+            ),
+            name: name,
+            url: "xuper://column/" + encodeURIComponent(columnId),
+            avatarUrl: ""
+        };
+    }
 };
 
 source.getChannelVideos = function(
@@ -1192,11 +1714,30 @@ source.getChannelVideos = function(
     order,
     filters
 ) {
+    const columnId = parseColumnId(url);
+
+    if (!columnId) {
+        throw new ScriptException(
+            "XuperTv",
+            "URL de canal sin columnId."
+        );
+    }
+
+    const columnType = /[?&]columnType=([^&#]+)/i.exec(String(url));
+    const typeValue = columnType && columnType[1]
+        ? decodeURIComponent(columnType[1])
+        : "";
+
+    const result = getShelveData(columnId, typeValue, 1);
+    const videos = parseSearchResults(result);
+
     return new VideoPager(
-        [],
-        false,
+        videos,
+        videos.length >= SEARCH_PAGE_SIZE,
         {
-            url: url
+            columnId: columnId,
+            type: typeValue,
+            page: 1
         }
     );
 };
@@ -1222,13 +1763,13 @@ source.getDiagnostics = function() {
         platform: PLATFORM_NAME,
         api: {
             startPlayVOD: "/api/portalCore/v10/startPlayVOD",
-            searchByName: "/api/portalCore/blSearchByName",
+            searchByName: "/api/portalCore/v3/searchByName",
             searchByContent: "/api/portalCore/blSearchByContent",
             getItemData: "/api/portalCore/v4/getItemData",
             getColumnContents: "/api/portalCore/v3/getColumnContents",
+            getShelveData: "/api/portalCore/v3/getShelveData",
             getHome: "/api/portalCore/getHome",
             getAuthInfo: "/api/portalCore/v9/getAuthInfo",
-            getSlbInfoV14: "/api/portalCore/v14/getSlbInfo",
             getSlbInfoV15: "/api/portalCore/v15/getSlbInfo"
         },
         configured: {
@@ -1236,7 +1777,15 @@ source.getDiagnostics = function() {
             backupBase: !!backupBase(),
             userId: !!userId(),
             userToken: !!userToken(),
-            portalCode: !!portalCode()
+            portalCode: !!portalCode(),
+            macAddr: !!macAddr()
+        },
+        slb: {
+            discoveryAttempted: _slbDiscoveryAttempted,
+            discoveredMain: !!_discoveredMain,
+            discoveredBackup: !!_discoveredBackup,
+            mainToken: !!_discoveredMainToken,
+            backupToken: !!_discoveredBackupToken
         }
     };
 };
