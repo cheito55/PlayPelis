@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v45
+// PlayPelis GrayJay Source v42
 // Multi-servidor + HLS + diagnóstico + fix portadas + headers Referer en fuentes
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -172,6 +172,13 @@ function isM3u8Url(url) {
     try {
         if (!url) return false;
         return /\.m3u8(?:[?#]|$)/i.test(String(url));
+    } catch (e) { return false; }
+}
+
+function isMp4Url(url) {
+    try {
+        if (!url) return false;
+        return /\.mp4(?:[?#]|$)/i.test(String(url));
     } catch (e) { return false; }
 }
 
@@ -446,6 +453,11 @@ function extractVideo(pageUrl) {
         return direct ? { url: direct, referer: null } : null;
     }
 
+    if (isMp4Url(pageUrl)) {
+        addDebug("[extract] mp4 directa detectada, usando tal cual");
+        return { url: pageUrl, referer: null };
+    }
+
     var host = getHost(pageUrl);
     addDebug("[extract] host=" + host);
 
@@ -523,14 +535,10 @@ function ppHome() {
         for (var i = 0; i < data.movies.length && i < 40; i++) {
             var m = data.movies[i];
             if (m.b) {
-                var thumbUrl = fixImg(m.d) || fixImg(m.c) || "";
-                // DEBUG TEMPORAL: se agrega la URL de imagen al título para
-                // ver exactamente qué se está generando en Inicio.
-                var debugSuffix = thumbUrl ? (" [IMG:" + thumbUrl.substring(0, 90) + "]") : " [IMG:NONE]";
                 videos.push(mkVideo(
                     "pp_m_" + m.a,
-                    (m.l ? "[" + m.l + "] " : "") + m.b + (m.f ? " (" + m.f + ")" : "") + debugSuffix,
-                    thumbUrl,
+                    (m.l ? "[" + m.l + "] " : "") + m.b + (m.f ? " (" + m.f + ")" : ""),
+                    fixImg(m.d) || fixImg(m.c) || "",
                     "pp://movie/" + m.a,
                     "PlayPelis"
                 ));
@@ -624,7 +632,7 @@ function ppMovieDetails(id) {
 
     var title = data.b || "";
     var thumb = fixImg(data.d) || fixImg(data.c) || "";
-    var desc = data.e || "";
+    var desc = "IMG_DEBUG: " + (thumb || "NONE") + "\n\n" + (data.e || "");
     var linksData = ppGet("/movies/" + id + "/links");
     var sources = [];
 
