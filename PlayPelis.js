@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v5
+// PlayPelis GrayJay Source v6
 // Multi-servidor + HLS + diagnóstico
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -261,6 +261,113 @@ function cleanUrl(url) {
     s = s.replace(/\\\//g, "/");
 
     return s;
+}
+
+// =========================================================
+// JS PACKER (Dean Edwards) - desempaquetador genérico
+// =========================================================
+// Muchos cyberlockers (streamtape, sbembed/sbplay, vidoza,
+// algunas variantes de dood, etc.) esconden el enlace real
+// dentro de un bloque tipo:
+//   eval(function(p,a,c,k,e,d){...}('PAYLOAD',RADIX,COUNT,'KEYWORDS'.split('|'),0,{}))
+// Esta función revierte ese empaquetado (sin usar eval) y
+// devuelve el código JS original en texto plano.
+
+function toBaseChars(num, base) {
+    var chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    if (num === 0) return "0";
+
+    var s = "";
+
+    while (num > 0) {
+        s = chars[num % base] + s;
+        num = Math.floor(num / base);
+    }
+
+    return s;
+}
+
+function findPackedBlocks(html) {
+    var blocks = [];
+
+    try {
+        var re = /eval\(function\(p,a,c,k,e,[rd]\)[\s\S]*?\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)/g;
+
+        var m;
+
+        while ((m = re.exec(html))) {
+            blocks.push({
+                payload: m[1],
+                radix: parseInt(m[2], 10) || 10,
+                count: parseInt(m[3], 10) || 0,
+                keywords: m[4].split("|")
+            });
+        }
+    } catch (e) {
+        addDebug("[packer] EXCEPTION buscando bloques: " + String(e));
+    }
+
+    return blocks;
+}
+
+function unpackBlock(block) {
+    try {
+        var lookup = {};
+
+        for (var i = block.count - 1; i >= 0; i--) {
+            var key = toBaseChars(i, block.radix);
+            lookup[key] = block.keywords[i] || key;
+        }
+
+        return block.payload.replace(/\b\w+\b/g, function(word) {
+            return lookup.hasOwnProperty(word) ? lookup[word] : word;
+        });
+    } catch (e) {
+        addDebug("[packer] EXCEPTION desempaquetando: " + String(e));
+        return "";
+    }
+}
+
+// Busca todos los bloques "packer" en el HTML, los desempaqueta,
+// y devuelve la primera URL .m3u8 o .mp4 que encuentre dentro.
+function tryPackerExtract(html) {
+    if (!html) return null;
+
+    var blocks = findPackedBlocks(html);
+
+    addDebug("[packer] bloques encontrados=" + blocks.length);
+
+    for (var i = 0; i < blocks.length; i++) {
+        var code = unpackBlock(blocks[i]);
+
+        if (!code) continue;
+
+        var m3u8 = code.match(/https?:\/\/[^"'\s\\<>]+\.m3u8[^"'\s\\<>]*/i);
+
+        if (m3u8) {
+            addDebug("[packer] m3u8 encontrada en bloque " + i);
+            return cleanUrl(m3u8[0]);
+        }
+
+        var mp4 = code.match(/https?:\/\/[^"'\s\\<>]+\.mp4[^"'\s\\<>]*/i);
+
+        if (mp4) {
+            addDebug("[packer] mp4 encontrado en bloque " + i);
+            return cleanUrl(mp4[0]);
+        }
+
+        // Algunos hosts arman la URL en variables separadas dentro
+        // del código desempaquetado, ej: file:"..." o src:"..."
+        var fileVar = code.match(/(?:file|src|source)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/i);
+
+        if (fileVar && fileVar[1]) {
+            addDebug("[packer] file/src encontrado en bloque " + i);
+            return cleanUrl(fileVar[1]);
+        }
+    }
+
+    return null;
 }
 
 function directHls(url) {
@@ -683,6 +790,16 @@ function doodExtract(pageUrl) {
             return cleanUrl(mp4[1]);
         }
 
+        var packedDood = tryPackerExtract(html);
+
+        if (packedDood) {
+            addDebug(
+                "[dood] extraído via JS Packer"
+            );
+
+            return packedDood;
+        }
+
         addDebug(
             "[dood] ningun patron encontro nada"
         );
@@ -763,6 +880,18 @@ function genericExtract(pageUrl) {
             );
 
             return cleanUrl(m[0]);
+        }
+
+        // Último recurso: muchos hosts (streamtape, sbembed/sbplay,
+        // vidoza, etc.) ocultan el enlace con JS Packer.
+        var packed = tryPackerExtract(html);
+
+        if (packed) {
+            addDebug(
+                "[generic] extraído via JS Packer"
+            );
+
+            return packed;
         }
 
         addDebug(
