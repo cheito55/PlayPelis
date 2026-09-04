@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v42
+// PlayPelis GrayJay Source v43
 // Multi-servidor + HLS + diagnóstico + fix portadas + headers Referer en fuentes
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -901,7 +901,81 @@ if (typeof source !== "undefined") {
     };
 
     source.isContentDetailsUrl = function(url) {
-        return url && (url.indexOf("jkanime.net") !== -1 || url.indexOf("pp://") !== -1);
+        if (!url) return false;
+        if (url.indexOf("jkanime.net") !== -1) return true;
+        if (url.indexOf("pp://movie/") === 0) return true;
+        // Solo rutas de EPISODIO (con temporada y numero) son "contenido con video".
+        if (/^pp:\/\/serie\/\d+\/\d+\/\d+$/.test(url)) return true;
+        return false;
+    };
+
+    // Una serie SIN temporada/episodio especificado se trata como Canal:
+    // GrayJay va a mostrar la lista de episodios en vez de intentar reproducir.
+    source.isChannelUrl = function(url) {
+        return !!(url && /^pp:\/\/serie\/\d+$/.test(url));
+    };
+
+    source.getChannel = function(url) {
+        try {
+            var m = url.match(/^pp:\/\/serie\/(\d+)$/);
+            if (!m) return null;
+            var id = m[1];
+            var data = ppGet("/series/" + id);
+            if (!data) return null;
+            var title = data.b || "";
+            var thumb = fixImg(data.d) || fixImg(data.c) || "";
+            return new PlatformChannel({
+                id: new PlatformID("PlayPelis", "serie_" + id, PID),
+                name: title || "Serie",
+                thumbnail: thumb,
+                banner: thumb,
+                subscribers: 0,
+                description: data.e || "",
+                url: url,
+                links: {}
+            });
+        } catch (e) {
+            addDebug("[getChannel] EXCEPTION: " + String(e));
+            return null;
+        }
+    };
+
+    source.getChannelContents = function(url) {
+        try {
+            var m = url.match(/^pp:\/\/serie\/(\d+)$/);
+            if (!m) return new VideoPager([], false, null);
+            var id = m[1];
+            var data = ppGet("/series/" + id);
+            if (!data) return new VideoPager([], false, null);
+
+            var title = data.b || "Serie";
+            var thumb = fixImg(data.d) || fixImg(data.c) || "";
+            var seasons = data.seasons || data.f || [];
+            if (typeof seasons === "number") seasons = [];
+
+            var videos = [];
+            for (var si = 0; si < seasons.length; si++) {
+                var season = seasons[si];
+                var seasonNum = season.num || season.a || (si + 1);
+                var episodes = season.episodes || season.b || [];
+                for (var ei = 0; ei < episodes.length; ei++) {
+                    var ep = episodes[ei];
+                    var epNum = ep.num || ep.a || (ei + 1);
+                    videos.push(mkVideo(
+                        "pp_se_" + id + "_" + seasonNum + "_" + epNum,
+                        title + " - T" + seasonNum + " Ep " + epNum,
+                        thumb,
+                        "pp://serie/" + id + "/" + seasonNum + "/" + epNum,
+                        "PlayPelis"
+                    ));
+                }
+            }
+
+            return new VideoPager(videos, false, null);
+        } catch (e) {
+            addDebug("[getChannelContents] EXCEPTION: " + String(e));
+            return new VideoPager([], false, null);
+        }
     };
 
     source.isVideoDetailsUrl = function(url) { return source.isContentDetailsUrl(url); };
@@ -912,7 +986,6 @@ if (typeof source !== "undefined") {
         catch (e) { return new VideoPager([], false, null); }
     };
 
-    source.isChannelUrl = function(url) { return false; };
     source.searchSuggestions = function(query) { return []; };
 
     source.getContentDetails = function(url) {
