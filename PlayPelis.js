@@ -1,5 +1,5 @@
-// PlayPelis GrayJay Source v1
-// Multi-servidor + HLS/MP4 + Enlaces Nativos + Fix Portadas
+// PlayPelis GrayJay Source v2
+// Corrección Regex de Series + Extracción Manual In-App + Portadas Fix + MP4 Full
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -80,6 +80,10 @@ function b64decode(s) {
     }
 }
 
+function safeDecode(str) {
+    try { return decodeURIComponent(str); } catch (e) { return str; }
+}
+
 function htmlDecode(s) {
     if (!s) return "";
     return String(s)
@@ -102,14 +106,16 @@ function stripTags(s) {
     ).trim();
 }
 
+// FIX: Soporte blindado para todo tipo de rutas de imágenes
 function fixImg(u) {
     if (!u) return "";
     var s = String(u).trim();
-    if (s.indexOf("ttps://") === 0) s = "https" + s.substring(4);
+    if (s.length === 0) return "";
+    if (s.indexOf("ttp") === 1) s = "h" + s.substring(1); 
     if (s.indexOf("http") === 0) return s;
+    if (s.indexOf("//") === 0) return "https:" + s;
     if (s.indexOf("/") === 0) return TMDB_IMG + s;
-    if (s.indexOf(".") !== -1) return TMDB_IMG + "/" + s;
-    return "";
+    return TMDB_IMG + "/" + s;
 }
 
 // =========================================================
@@ -117,7 +123,7 @@ function fixImg(u) {
 // =========================================================
 function mkThumb(url) {
     if (!url) return new Thumbnails([]);
-    return new Thumbnails([new Thumbnail(url, 100)]);
+    return new Thumbnails([new Thumbnail(url, 720)]);
 }
 
 function mkVideo(id, title, thumb, url, authorName) {
@@ -142,11 +148,11 @@ function mkHls(url, name, duration) {
 function mkMp4(url, name) {
     if (!url) return null;
     return new VideoUrlSource({
-        width: 0, height: 0,
+        width: 1280, height: 720,
         container: "video/mp4",
-        codec: "avc1",
+        codec: "avc1.4d401e", // Requerido por GrayJay para identificar streams de MP4 directo
         name: name || "MP4",
-        bitrate: 0, duration: 0,
+        bitrate: 1000000, duration: 0,
         url: url
     });
 }
@@ -242,6 +248,9 @@ function voeExtract(pageUrl) {
 
         var m = html.match(/hls\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]/i);
         if (m && m[1]) return cleanUrl(m[1]);
+        
+        var m2 = html.match(/mp4\s*:\s*['"]([^'"]+\.mp4[^'"]*)['"]/i);
+        if (m2 && m2[1]) return cleanUrl(m2[1]);
 
         var am = html.match(/atob\(['"]([^'"]+)['"]\)/);
         if (am) {
@@ -322,9 +331,9 @@ function mkDetail(id, name, thumb, url, videoSources, description) {
 
     var desc = description || "";
     if (valid.length === 0) {
-        desc = "⚠️ No se encontró una fuente de vídeo reproducible.\n\n" + desc;
+        desc = "⚠️ GrayJay no encontró fuentes automáticas compatibles.\n\nToca uno de los servidores en la lista de abajo para Forzar la Extracción Manual In-App.\n\n" + desc;
     } else {
-        desc = "✅ Fuentes reproducibles encontradas: " + valid.length + " (Puedes cambiar de servidor usando el ícono de la tuerca ⚙️ en el reproductor).\n\n" + desc;
+        desc = "✅ Fuentes HLS/MP4 automáticas: " + valid.length + " (Cámbialas usando el ícono de engranaje ⚙️ en el reproductor).\n\n" + desc;
     }
 
     if (_debugLog.length > 0) desc += "\n\n=== REPORTE TÉCNICO ===\n" + _debugLog;
@@ -427,7 +436,7 @@ function ppMovieDetails(id) {
     var sources = [];
 
     if (linksData && linksData.length) {
-        desc += "\n\n--- Servidores Extraídos ---";
+        desc += "\n\n--- Servidores (Click para Forzar Extracción) ---";
         var tried = 0;
         for (var i = 0; i < linksData.length && tried < MAX_TRY; i++) {
             var link = linksData[i];
@@ -436,7 +445,10 @@ function ppMovieDetails(id) {
             tried++;
 
             var serverName = (link.b || "Servidor") + " [" + (link.c || "") + "]";
-            desc += "\n" + serverName + " → " + linkUrl;
+            
+            // Link interno que intercepta GrayJay
+            var rawUrl = "https://playpelis.app/extract?url=" + encodeURIComponent(linkUrl) + "&title=" + encodeURIComponent(title) + "&thumb=" + encodeURIComponent(thumb);
+            desc += "\n" + serverName + " → " + rawUrl;
 
             var extracted = extractVideo(linkUrl);
             if (extracted) {
@@ -492,7 +504,7 @@ function ppEpisodeLinks(id, season, episode) {
     var thumb = fixImg(data.d) || fixImg(data.c) || "";
     var linksData = ppGet("/series/" + id + "/links/" + season + "/" + episode);
     
-    var desc = title + "\n\n--- Servidores ---";
+    var desc = title + "\n\n--- Servidores (Click para Forzar Extracción) ---";
     var sources = [];
 
     if (linksData && linksData.length) {
@@ -504,7 +516,9 @@ function ppEpisodeLinks(id, season, episode) {
             tried++;
 
             var serverName = (link.b || "Servidor") + " [" + (link.c || "") + "]";
-            desc += "\n" + serverName + " → " + linkUrl;
+            var rawUrl = "https://playpelis.app/extract?url=" + encodeURIComponent(linkUrl) + "&title=" + encodeURIComponent(title) + "&thumb=" + encodeURIComponent(thumb);
+            
+            desc += "\n" + serverName + " → " + rawUrl;
 
             var extracted = extractVideo(linkUrl);
             if (extracted) {
@@ -579,7 +593,7 @@ function jkaDetails(url) {
 
     var thumb = "";
     var im = html.match(/<img[^>]*src=["']([^"']*animes\/(?:image|video)\/[^"']+)["']/i);
-    if (im) thumb = im[1].indexOf("http") === 0 ? im[1] : JK + "/" + im[1].replace(/^\/+/, "");
+    if (im) thumb = fixImg(im[1].indexOf("http") === 0 ? im[1] : JK + "/" + im[1].replace(/^\/+/, ""));
 
     var desc = "";
     var seriesMatch = url.match(/jkanime\.net\/([a-z0-9-]+)\/?$/i);
@@ -638,16 +652,45 @@ function doDetails(url) {
     if (!url) return mkDetail("", "", "", "", [], "URL vacía");
     if (url.indexOf("jkanime.net") !== -1) return jkaDetails(url);
 
+    // FIX: Intercepción de Extracción Manual de los servidores
+    if (url.indexOf("playpelis.app/extract?") !== -1) {
+        var params = url.split("?")[1];
+        var uMatch = params.match(/url=([^&]+)/);
+        var tMatch = params.match(/title=([^&]+)/);
+        var iMatch = params.match(/thumb=([^&]+)/);
+        
+        var targetUrl = uMatch ? safeDecode(uMatch[1]) : "";
+        var targetTitle = tMatch ? safeDecode(tMatch[1]) : "Servidor Manual";
+        var targetThumb = iMatch ? safeDecode(iMatch[1]) : "";
+        
+        var sources = [];
+        var extracted = extractVideo(targetUrl);
+        if (extracted) {
+            var src = (extracted.indexOf(".mp4") !== -1) ? mkMp4(extracted, "Reproducir MP4") : mkHls(extracted, "Reproducir HLS");
+            if (src) sources.push(src);
+        }
+        
+        var d = "Extracción manual del servidor:\n" + targetUrl;
+        if (sources.length === 0) {
+            d += "\n\n❌ La extracción falló. El servidor puede requerir captcha, estar bloqueado o no ser compatible de forma directa.\n\n🔗 Abre este enlace en tu navegador para verlo allí:\n" + targetUrl;
+        } else {
+            d += "\n\n✅ Extracción exitosa. El video debería reproducirse ahora automáticamente.";
+        }
+        
+        return mkDetail("ext_" + targetUrl.replace(/[^a-zA-Z0-9]/g, "").substring(0, 20), targetTitle, targetThumb, url, sources, d);
+    }
+
+    // FIX: [^\/]+ en lugar de \d+ soluciona el fallo total en IDs de series con texto
     if (url.indexOf("playpelis.app/movie/") !== -1) {
-        var mm = url.match(/playpelis\.app\/movie\/(\d+)/);
+        var mm = url.match(/playpelis\.app\/movie\/([^\/]+)/);
         if (mm) return ppMovieDetails(mm[1]);
     }
 
     if (url.indexOf("playpelis.app/serie/") !== -1) {
-        var se = url.match(/playpelis\.app\/serie\/(\d+)\/(\d+)\/(\d+)/);
+        var se = url.match(/playpelis\.app\/serie\/([^\/]+)\/([^\/]+)\/([^\/]+)/);
         if (se) return ppEpisodeLinks(se[1], se[2], se[3]);
 
-        var ss = url.match(/playpelis\.app\/serie\/(\d+)/);
+        var ss = url.match(/playpelis\.app\/serie\/([^\/]+)/);
         if (ss) return ppSerieDetails(ss[1]);
     }
 
@@ -677,7 +720,7 @@ function doHome() {
                 videos.push(mkVideo(
                     "jk_home_" + (lm ? lm[1] : JK + "/"),
                     "[Anime] " + stripTags(m[2]),
-                    m[1],
+                    fixImg(m[1]),
                     lm ? lm[1] : JK + "/",
                     "JkAnime"
                 ));
@@ -705,7 +748,8 @@ if (typeof source !== "undefined") {
             url && (
                 url.indexOf("jkanime.net") !== -1 || 
                 url.indexOf("playpelis.app/movie/") !== -1 || 
-                url.indexOf("playpelis.app/serie/") !== -1
+                url.indexOf("playpelis.app/serie/") !== -1 ||
+                url.indexOf("playpelis.app/extract") !== -1 // FIX: Permite intercepción nativa
             )
         );
     };
@@ -730,7 +774,7 @@ if (typeof source !== "undefined") {
             return new PlatformVideoDetails({
                 id: new PlatformID("PlayPelis", "error_fallo", PID),
                 name: "Error de Extractor",
-                thumbnails: new Thumbnails([new Thumbnail(TMDB_IMG + "/wwemzKWzjKYJFfCeiB57q3r4Bcm.png", 100)]),
+                thumbnails: new Thumbnails([new Thumbnail(TMDB_IMG + "/wwemzKWzjKYJFfCeiB57q3r4Bcm.png", 720)]),
                 author: new PlatformAuthorLink(PPID, "PlayPelis", "https://playpelis.app", "", 0),
                 uploadDate: 0, url: url || "https://playpelis.app", duration: 0, viewCount: 0, isLive: false,
                 description: "CRASH CRÍTICO: " + String(e) + "\n\nLOG TÉCNICO:\n" + _debugLog,
