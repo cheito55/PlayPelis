@@ -1,1865 +1,2028 @@
-// ============================================================
-// GrayJay - OK.ru Source v3
-// Multi-source HLS + MP4
-// Cast compatible
-// Search + details + diagnostics
-// Basado en la arquitectura de PlayPelis v41
-// ============================================================
+/*
+ * ============================================================
+ * GrayJay - OK.ru Source v6
+ * ============================================================
+ *
+ * OK.ru -> HLS / MP4
+ *
+ * Mejoras:
+ *  - Extracción robusta de metadata
+ *  - data-options / flashvars / JSON embebido
+ *  - HLS prioritario
+ *  - MP4 fallback
+ *  - videoembed
+ *  - múltiples URLs HLS
+ *  - mejor búsqueda
+ *  - VideoPager / PlatformVideo
+ *  - constructores GrayJay modernos
+ *  - deduplicación
+ *  - protección contra JSON recursivo
+ *  - diagnóstico limitado
+ *
+ * Xuper:
+ *  - reconoce play_params
+ *  - reconoce verificationToken
+ *  - reconoce playlistUrl
+ *  - reconoce signdata
+ *
+ * NO se inventa ninguna firma ni algoritmo privado.
+ * ============================================================
+ */
 
-var PLATFORM_NAME = "OK.ru";
+const PLATFORM_NAME = "OK.ru";
 
-var REGEX_VIDEO_URL = /ok\.ru\/(?:video|videoembed)\/(\d+)/i;
+const PLUGIN_ID =
+    "62af0e2f-bfd9-489f-afe1-f66583d2f7d0";
 
-var SEARCH_URL_BASE =
+const REGEX_VIDEO_URL =
+    /(?:https?:\/\/)?(?:www\.|m\.)?ok\.ru\/(?:video|videoembed)\/(\d+)/i;
+
+const SEARCH_URL_BASE =
     "https://ok.ru/dk?st.cmd=searchResult&st.mode=Movie&st.grmode=Groups&st.query=";
 
-// ------------------------------------------------------------
-// CONFIG
-// ------------------------------------------------------------
+const MAX_HTML_SIZE = 5000000;
+const MAX_JSON_DEPTH = 14;
+const MAX_SOURCES = 40;
+const MAX_DEBUG = 60;
 
-var PLUGIN_ID = "";
+const UA_DESKTOP =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+    "Chrome/136.0.0.0 Safari/537.36";
 
-var _settings = {};
-var _debugLog = [];
+const UA_MOBILE =
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
+    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+    "Chrome/136.0.0.0 Mobile Safari/537.36";
 
-var MAX_HTML_SIZE = 5000000;
-var MAX_JSON_DEPTH = 12;
-var MAX_SOURCES = 30;
-
-
-// ============================================================
-// DEBUG
-// ============================================================
-
-function addDebug(msg) {
-    try {
-        if (msg == null) return;
-
-        var s = String(msg);
-
-        if (s.length > 500) {
-            s = s.substring(0, 500) + "...";
-        }
-
-        _debugLog.push(s);
-
-        if (_debugLog.length > 40) {
-            _debugLog.shift();
-        }
-    } catch (e) {
-    }
-}
+let DEBUG = [];
 
 
-function debugText() {
-    try {
-        if (_debugLog.length === 0) {
-            return "";
-        }
-
-        return "\n\n[OK.ru diagnóstico]\n" + _debugLog.join("\n");
-    } catch (e) {
-        return "";
-    }
-}
-
+/* ============================================================
+ * DEBUG
+ * ============================================================ */
 
 function resetDebug() {
-    _debugLog = [];
+    DEBUG = [];
+}
+
+function addDebug(value) {
+    try {
+        let s = safeStr(value);
+        if (!s) return;
+
+        if (DEBUG.length >= MAX_DEBUG)
+            DEBUG.shift();
+
+        if (s.length > 700)
+            s = s.substring(0, 700) + "...";
+
+        DEBUG.push(s);
+    } catch (_) {}
+}
+
+function debugText() {
+    return DEBUG.join("\n");
 }
 
 
-// ============================================================
-// STRING / HTML UTILITIES
-// ============================================================
+/* ============================================================
+ * BASIC HELPERS
+ * ============================================================ */
 
 function safeStr(v) {
     try {
-        if (v == null) return "";
+        if (v === null || v === undefined)
+            return "";
+
+        if (typeof v === "string")
+            return v;
+
         return String(v);
-    } catch (e) {
+    } catch (_) {
         return "";
     }
 }
 
-
 function safeObj(v) {
-    try {
-        return v && typeof v === "object" ? v : null;
-    } catch (e) {
-        return null;
-    }
+    return v !== null &&
+        typeof v === "object";
 }
-
 
 function htmlDecode(s) {
-    s = safeStr(s);
-
-    return s
-        .replace(/&amp;/gi, "&")
+    return safeStr(s)
         .replace(/&quot;/gi, '"')
-        .replace(/&#34;/gi, '"')
-        .replace(/&#39;/gi, "'")
+        .replace(/&#34;/g, '"')
+        .replace(/&#39;/g, "'")
         .replace(/&apos;/gi, "'")
+        .replace(/&amp;/gi, "&")
         .replace(/&lt;/gi, "<")
         .replace(/&gt;/gi, ">")
-        .replace(/&nbsp;/gi, " ")
-        .replace(/&#x2F;/gi, "/")
-        .replace(/&#47;/gi, "/")
-        .replace(/\\u0026/g, "&")
-        .replace(/\\u003D/gi, "=")
-        .replace(/\\u002F/gi, "/")
-        .replace(/\\\//g, "/");
+        .replace(/&#x2f;/gi, "/")
+        .replace(/&#47;/g, "/")
+        .replace(/&#x3d;/gi, "=")
+        .replace(/&#61;/g, "=");
 }
-
 
 function stripTags(s) {
-    return htmlDecode(safeStr(s))
-        .replace(/<script[\s\S]*?<\/script>/gi, "")
-        .replace(/<style[\s\S]*?<\/style>/gi, "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+    return safeStr(s)
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]*>/g, " ");
 }
-
 
 function cleanText(s) {
-    return stripTags(s)
+    return htmlDecode(stripTags(s))
         .replace(/\s+/g, " ")
         .trim();
 }
 
-
-function cleanUrl(url) {
-    url = safeStr(url).trim();
-
-    if (!url) return "";
-
-    url = htmlDecode(url);
-
-    url = url
-        .replace(/^['"]+/, "")
-        .replace(/['"]+$/, "")
-        .replace(/\\u0026/g, "&")
-        .replace(/\\u003D/g, "=")
-        .replace(/\\u002F/g, "/")
+function cleanUrl(s) {
+    return htmlDecode(safeStr(s))
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u003A/gi, ":")
+        .replace(/\\u003D/gi, "=")
         .replace(/\\\//g, "/")
+        .replace(/&amp;/gi, "&")
+        .replace(/^["']+|["']+$/g, "")
         .trim();
+}
 
-    if (url.indexOf("//") === 0) {
-        url = "https:" + url;
+function normalizeUrl(s, base) {
+    s = cleanUrl(s);
+
+    if (!s)
+        return "";
+
+    if (s.indexOf("//") === 0)
+        return "https:" + s;
+
+    if (/^https?:\/\//i.test(s))
+        return s;
+
+    if (base && s.charAt(0) === "/") {
+        try {
+            let m = safeStr(base)
+                .match(/^(https?:\/\/[^/]+)/i);
+
+            if (m)
+                return m[1] + s;
+        } catch (_) {}
     }
 
-    return url;
+    return s;
 }
 
-
-function normalizeUrl(url) {
-    return cleanUrl(url)
-        .replace(/[),.;]+$/, "");
-}
-
-
-function isHttpUrl(url) {
-    url = normalizeUrl(url);
-    return /^https?:\/\//i.test(url);
-}
-
-
-function isExternalProvider(url) {
-    url = safeStr(url).toLowerCase();
-
-    return (
-        url.indexOf("youtube.com") >= 0 ||
-        url.indexOf("youtu.be") >= 0 ||
-        url.indexOf("vimeo.com") >= 0 ||
-        url.indexOf("dailymotion.com") >= 0
+function isHttpUrl(s) {
+    return /^https?:\/\//i.test(
+        cleanUrl(s)
     );
 }
 
-
-function isM3u8Url(url) {
-    return /\.m3u8(?:$|[?#&])/i.test(safeStr(url));
+function isM3u8Url(s) {
+    return /\.m3u8(?:$|[?#])/i.test(
+        cleanUrl(s)
+    );
 }
 
-
-// ============================================================
-// URL / HOST
-// ============================================================
+function isMp4Url(s) {
+    return /\.(?:mp4|m4v|mov)(?:$|[?#])/i.test(
+        cleanUrl(s)
+    );
+}
 
 function getHost(url) {
     try {
-        var m = safeStr(url).match(/^https?:\/\/([^\/?#]+)/i);
+        let m = safeStr(url)
+            .match(/^https?:\/\/([^/]+)/i);
 
-        if (!m) return "";
-
-        return m[1].toLowerCase();
-    } catch (e) {
+        return m ? m[1].toLowerCase() : "";
+    } catch (_) {
         return "";
     }
 }
-
 
 function extractVideoId(url) {
     try {
-        var m = safeStr(url).match(REGEX_VIDEO_URL);
+        let m = safeStr(url)
+            .match(REGEX_VIDEO_URL);
 
         return m ? m[1] : "";
-    } catch (e) {
+    } catch (_) {
         return "";
     }
 }
 
+function firstValue(obj, keys) {
+    if (!safeObj(obj))
+        return "";
 
-// ============================================================
-// HTTP
-// ============================================================
+    for (let i = 0; i < keys.length; i++) {
+        try {
+            let v = obj[keys[i]];
+
+            if (v !== undefined &&
+                v !== null) {
+
+                let s = safeStr(v);
+
+                if (s)
+                    return s;
+            }
+        } catch (_) {}
+    }
+
+    return "";
+}
+
+
+/* ============================================================
+ * HTTP
+ * ============================================================ */
+
+function mergeHeaders(target, extra) {
+    if (!target)
+        target = {};
+
+    if (!safeObj(extra))
+        return target;
+
+    try {
+        for (let k in extra) {
+            if (extra[k] !== null &&
+                extra[k] !== undefined) {
+
+                target[k] = safeStr(extra[k]);
+            }
+        }
+    } catch (_) {}
+
+    return target;
+}
+
+function readResponseBody(r) {
+    if (!r)
+        return "";
+
+    let body = "";
+
+    try {
+        body = r.body;
+    } catch (_) {}
+
+    if (!body) {
+        try {
+            body = r.getBody();
+        } catch (_) {}
+    }
+
+    body = safeStr(body);
+
+    if (body.length > MAX_HTML_SIZE)
+        body = body.substring(0, MAX_HTML_SIZE);
+
+    return body;
+}
 
 function httpGet(url, headers) {
     try {
-        if (!url) return "";
+        let h = {
+            "User-Agent": UA_DESKTOP,
+            "Accept":
+                "text/html,application/xhtml+xml," +
+                "application/xml;q=0.9," +
+                "image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language":
+                "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        };
 
-        var h = {};
+        mergeHeaders(h, headers);
 
-        h["User-Agent"] =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/136.0.0.0 Safari/537.36";
+        let r = http.GET(url, h);
 
-        if (headers) {
-            for (var k in headers) {
-                try {
-                    h[k] = headers[k];
-                } catch (ignore) {
-                }
-            }
-        }
-
-        addDebug("GET " + url);
-
-        var response = http.GET(url, h);
-
-        if (response == null) {
-            addDebug("Respuesta HTTP nula");
-            return "";
-        }
-
-        var body = "";
-
-        try {
-            body = response.body;
-        } catch (e1) {
-            try {
-                body = response.getBody();
-            } catch (e2) {
-            }
-        }
-
-        body = safeStr(body);
-
-        addDebug("HTTP OK: " + body.length + " bytes");
-
-        if (body.length > MAX_HTML_SIZE) {
-            addDebug("Respuesta demasiado grande");
-            return body.substring(0, MAX_HTML_SIZE);
-        }
-
-        return body;
-
+        return readResponseBody(r);
     } catch (e) {
-        addDebug("HTTP error: " + e);
+        addDebug("GET: " + e);
         return "";
     }
 }
 
-
-function httpGetAuthenticated(url) {
+function httpGetAuth(url) {
     try {
-        addDebug("Intentando petición autenticada GrayJay");
+        let r = http.GET(url);
 
-        var response = http.GET(url);
-
-        if (response == null) {
-            return "";
-        }
-
-        var body = "";
-
-        try {
-            body = response.body;
-        } catch (e1) {
-            try {
-                body = response.getBody();
-            } catch (e2) {
-            }
-        }
-
-        return safeStr(body);
-
+        return readResponseBody(r);
     } catch (e) {
-        addDebug("Auth HTTP error: " + e);
+        addDebug("AUTH GET: " + e);
         return "";
     }
 }
 
+function loadOkPage(url) {
+    let attempts = [
+        function () {
+            return httpGetAuth(url);
+        },
 
-// ============================================================
-// PAGE LOADER
-// ============================================================
+        function () {
+            return httpGet(url, {
+                "User-Agent": UA_DESKTOP
+            });
+        },
 
-function buildVideoPageUrl(id) {
-    return "https://ok.ru/video/" + id;
-}
-
-
-function buildMobileVideoPageUrl(id) {
-    return "https://m.ok.ru/video/" + id;
-}
-
-
-function loadOkVideoPage(id) {
-    resetDebug();
-
-    var desktop = buildVideoPageUrl(id);
-    var mobile = buildMobileVideoPageUrl(id);
-
-    var html = "";
-
-    // --------------------------------------------------------
-    // 1. GrayJay authenticated
-    // --------------------------------------------------------
-
-    html = httpGetAuthenticated(desktop);
-
-    if (html && html.length > 500) {
-        addDebug("Página desktop obtenida mediante GrayJay");
-        return html;
-    }
-
-    // --------------------------------------------------------
-    // 2. Desktop normal
-    // --------------------------------------------------------
-
-    html = httpGet(desktop, {
-        "Accept":
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": "https://ok.ru/"
-    });
-
-    if (html && html.length > 500) {
-        addDebug("Página desktop obtenida");
-        return html;
-    }
-
-    // --------------------------------------------------------
-    // 3. Mobile authenticated
-    // --------------------------------------------------------
-
-    html = httpGetAuthenticated(mobile);
-
-    if (html && html.length > 500) {
-        addDebug("Página móvil obtenida mediante GrayJay");
-        return html;
-    }
-
-    // --------------------------------------------------------
-    // 4. Mobile normal
-    // --------------------------------------------------------
-
-    html = httpGet(mobile, {
-        "Accept":
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": "https://m.ok.ru/"
-    });
-
-    if (html && html.length > 500) {
-        addDebug("Página móvil obtenida");
-        return html;
-    }
-
-    addDebug("No se pudo obtener la página de OK.ru");
-
-    return "";
-}
-
-
-// ============================================================
-// DATA-OPTIONS EXTRACTION
-// ============================================================
-
-function extractDataOptions(html) {
-    if (!html) return "";
-
-    var patterns = [
-        /data-options\s*=\s*"([^"]+)"/i,
-        /data-options\s*=\s*'([^']+)'/i,
-        /data-options\s*=\s*([^ >]+)/i
+        function () {
+            return httpGet(url, {
+                "User-Agent": UA_MOBILE,
+                "Accept-Language": "es-AR,es;q=0.9,en;q=0.8"
+            });
+        }
     ];
 
-    for (var i = 0; i < patterns.length; i++) {
+    for (let i = 0; i < attempts.length; i++) {
         try {
-            var m = html.match(patterns[i]);
+            let body = attempts[i]();
 
-            if (m && m[1]) {
-                return htmlDecode(m[1]);
+            if (body &&
+                body.length > 300) {
+
+                addDebug(
+                    "OK page attempt " + i
+                );
+
+                return body;
             }
-        } catch (e) {
-        }
+        } catch (_) {}
     }
 
     return "";
 }
 
 
-// ============================================================
-// JSON PARSING
-// ============================================================
+/* ============================================================
+ * JSON
+ * ============================================================ */
 
 function tryParseJson(value) {
-    try {
-        if (value == null) return null;
+    if (value === null ||
+        value === undefined)
+        return null;
 
-        if (typeof value === "object") {
-            return value;
+    if (safeObj(value))
+        return value;
+
+    let s = safeStr(value).trim();
+
+    if (!s)
+        return null;
+
+    for (let i = 0; i < 6; i++) {
+        try {
+            return JSON.parse(s);
+        } catch (_) {}
+
+        let decoded = htmlDecode(s);
+
+        if (decoded !== s) {
+            s = decoded;
+            continue;
         }
 
-        var s = safeStr(value).trim();
-
-        if (!s) return null;
-
-        s = htmlDecode(s);
-
-        // JSON puede estar escapado
         if (
-            (s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') ||
-            (s.charAt(0) === "'" && s.charAt(s.length - 1) === "'")
+            (s.charAt(0) === '"' &&
+             s.charAt(s.length - 1) === '"') ||
+            (s.charAt(0) === "'" &&
+             s.charAt(s.length - 1) === "'")
         ) {
-            s = s.substring(1, s.length - 1);
+            s = s.substring(
+                1,
+                s.length - 1
+            );
+
+            continue;
         }
 
-        try {
-            return JSON.parse(s);
-        } catch (e1) {
+        let unescaped = s
+            .replace(/\\"/g, '"')
+            .replace(/\\'/g, "'")
+            .replace(/\\\\/g, "\\");
+
+        if (unescaped !== s) {
+            s = unescaped;
+            continue;
         }
 
-        // Intentar desescapar
-        try {
-            s = s
-                .replace(/\\"/g, '"')
-                .replace(/\\\\/g, "\\")
-                .replace(/\\u0026/g, "&")
-                .replace(/\\u003D/g, "=")
-                .replace(/\\\//g, "/");
-
-            return JSON.parse(s);
-        } catch (e2) {
-        }
-
-    } catch (e) {
-        addDebug("JSON parse error: " + e);
+        break;
     }
 
     return null;
 }
 
 
-// ============================================================
-// METADATA
-// ============================================================
+/* ============================================================
+ * DATA-OPTIONS
+ * ============================================================ */
 
-function findMetadataInObject(obj, depth) {
-    if (!obj || depth > MAX_JSON_DEPTH) {
-        return null;
+function extractDataOptions(html) {
+    let out = [];
+
+    let re =
+        /(?:data-options|data-options-json)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+
+    let m;
+
+    while (
+        (m = re.exec(html || "")) !== null &&
+        out.length < 30
+    ) {
+        let raw =
+            m[1] !== undefined
+                ? m[1]
+                : m[2];
+
+        let obj = tryParseJson(raw);
+
+        if (obj)
+            out.push(obj);
     }
 
-    if (typeof obj !== "object") {
-        return null;
-    }
+    return out;
+}
+
+
+/* ============================================================
+ * METADATA DISCOVERY
+ * ============================================================ */
+
+function looksLikeVideoObject(obj) {
+    if (!safeObj(obj))
+        return false;
 
     try {
-        if (obj.flashvars) {
-            if (obj.flashvars.metadata) {
-                return obj.flashvars.metadata;
-            }
+        let keys = [
+            "playlistUrl",
+            "hlsUrl",
+            "hlsMasterPlaylistUrl",
+            "hlsManifestUrl",
+            "videoUrl",
+            "metadataUrl",
+            "flashvars",
+            "play_params",
+            "verificationToken",
+            "signdata"
+        ];
 
-            if (obj.flashvars.metadataUrl) {
-                return {
-                    metadataUrl: obj.flashvars.metadataUrl
-                };
-            }
+        for (let i = 0; i < keys.length; i++) {
+            if (obj[keys[i]] !== undefined)
+                return true;
         }
+    } catch (_) {}
 
-        if (obj.metadata) {
-            return obj.metadata;
-        }
-
-        for (var key in obj) {
-            try {
-                var value = obj[key];
-
-                if (
-                    typeof value === "string" &&
-                    (
-                        key.toLowerCase().indexOf("metadata") >= 0 ||
-                        key.toLowerCase().indexOf("flashvars") >= 0
-                    )
-                ) {
-                    var parsed = tryParseJson(value);
-
-                    if (parsed) {
-                        var found = findMetadataInObject(parsed, depth + 1);
-
-                        if (found) return found;
-
-                        return parsed;
-                    }
-                }
-
-                if (typeof value === "object") {
-                    var result = findMetadataInObject(
-                        value,
-                        depth + 1
-                    );
-
-                    if (result) {
-                        return result;
-                    }
-                }
-
-            } catch (ignore) {
-            }
-        }
-
-    } catch (e) {
-    }
-
-    return null;
+    return false;
 }
 
+function findMetadataInObject(root, depth) {
+    if (!safeObj(root))
+        return null;
 
-function extractMetadataFromHtml(html) {
-    if (!html) return null;
+    if (depth > MAX_JSON_DEPTH)
+        return null;
 
-    // --------------------------------------------------------
-    // Primero data-options
-    // --------------------------------------------------------
+    if (looksLikeVideoObject(root))
+        return root;
 
-    var optionsText = extractDataOptions(html);
+    if (Array.isArray(root)) {
+        for (let i = 0; i < root.length; i++) {
+            let found =
+                findMetadataInObject(
+                    root[i],
+                    depth + 1
+                );
 
-    if (optionsText) {
-        var options = tryParseJson(optionsText);
-
-        if (options) {
-            var metadata = findMetadataInObject(options, 0);
-
-            if (metadata) {
-                addDebug("Metadata encontrada en data-options");
-                return metadata;
-            }
+            if (found)
+                return found;
         }
+
+        return null;
     }
 
-    // --------------------------------------------------------
-    // Buscar flashvars.metadata directamente
-    // --------------------------------------------------------
-
-    var patterns = [
-        /"metadata"\s*:\s*"((?:\\.|[^"])*)"/i,
-        /'metadata'\s*:\s*'((?:\\.|[^'])*)'/i,
-        /flashvars[^]{0,5000}metadata[^]{0,5000}/i
+    let preferred = [
+        "metadata",
+        "flashvars",
+        "video",
+        "movie",
+        "movieData",
+        "media",
+        "stream",
+        "playlist",
+        "data",
+        "result"
     ];
 
-    for (var i = 0; i < patterns.length; i++) {
+    for (let i = 0; i < preferred.length; i++) {
         try {
-            var m = html.match(patterns[i]);
+            let key = preferred[i];
 
-            if (!m) continue;
+            if (root[key] !== undefined) {
+                let found =
+                    findMetadataInObject(
+                        root[key],
+                        depth + 1
+                    );
 
-            if (m[1]) {
-                var parsed = tryParseJson(m[1]);
-
-                if (parsed) {
-                    addDebug("Metadata encontrada directamente");
-                    return parsed;
-                }
+                if (found)
+                    return found;
             }
-
-        } catch (e) {
-        }
+        } catch (_) {}
     }
 
-    // --------------------------------------------------------
-    // Buscar cualquier bloque JSON grande
-    // --------------------------------------------------------
+    try {
+        for (let key in root) {
+            if (depth >= MAX_JSON_DEPTH)
+                break;
 
-    var jsonCandidates = [];
+            let value = root[key];
 
-    var regexJson =
-        /(?:flashvars|metadata|player|video)\s*[:=]\s*(\{[\s\S]{20,200000}\})/gi;
+            if (
+                /metadata|flashvar|video|movie|media|stream|playlist|player/i
+                    .test(key)
+            ) {
+                let found =
+                    findMetadataInObject(
+                        value,
+                        depth + 1
+                    );
 
-    var jm;
-
-    while ((jm = regexJson.exec(html)) !== null) {
-        if (jm[1]) {
-            jsonCandidates.push(jm[1]);
-        }
-
-        if (jsonCandidates.length >= 10) {
-            break;
-        }
-    }
-
-    for (var j = 0; j < jsonCandidates.length; j++) {
-        var candidate = tryParseJson(jsonCandidates[j]);
-
-        if (candidate) {
-            var md = findMetadataInObject(candidate, 0);
-
-            if (md) {
-                addDebug("Metadata encontrada en bloque JSON");
-                return md;
+                if (found)
+                    return found;
             }
         }
-    }
+    } catch (_) {}
 
     return null;
 }
 
+function extractJsonObjectsFromHtml(html) {
+    let objects = [];
 
-// ============================================================
-// METADATA URL
-// ============================================================
+    let patterns = [
+        /(?:metadata|flashvars|video|movie|player|data)\s*[:=]\s*(\{[\s\S]{20,300000}\})/gi
+    ];
 
-function fetchMetadataUrl(url) {
-    url = cleanUrl(url);
+    for (let p = 0; p < patterns.length; p++) {
+        let re = patterns[p];
+        let m;
 
-    if (!url || !isHttpUrl(url)) {
-        return null;
-    }
-
-    addDebug("Metadata URL detectada");
-
-    var body = httpGet(url, {
-        "Referer": "https://ok.ru/",
-        "Accept": "application/json,text/plain,*/*"
-    });
-
-    if (!body) {
-        return null;
-    }
-
-    var parsed = tryParseJson(body);
-
-    if (parsed) {
-        return parsed;
-    }
-
-    return null;
-}
-
-
-function parseMetadata(html) {
-    var metadata = extractMetadataFromHtml(html);
-
-    if (!metadata) {
-        addDebug("No se encontró metadata");
-        return null;
-    }
-
-    // metadata puede ser string
-    if (typeof metadata === "string") {
-        var parsed = tryParseJson(metadata);
-
-        if (parsed) {
-            metadata = parsed;
-        }
-    }
-
-    // metadataUrl
-    if (
-        metadata &&
-        metadata.metadataUrl
-    ) {
-        var remote = fetchMetadataUrl(metadata.metadataUrl);
-
-        if (remote) {
-            metadata = remote;
-        }
-    }
-
-    return metadata;
-}
-
-
-// ============================================================
-// URL COLLECTION
-// ============================================================
-
-function pushUnique(arr, url) {
-    url = normalizeUrl(url);
-
-    if (!url || !isHttpUrl(url)) {
-        return;
-    }
-
-    if (isExternalProvider(url)) {
-        return;
-    }
-
-    for (var i = 0; i < arr.length; i++) {
-        if (arr[i] === url) {
-            return;
-        }
-    }
-
-    arr.push(url);
-}
-
-
-function collectUrlsFromString(text, hls, mp4) {
-    text = safeStr(text);
-
-    if (!text) return;
-
-    var regex =
-        /https?:\/\/[^"'\\<>\s]+/gi;
-
-    var m;
-
-    while ((m = regex.exec(text)) !== null) {
-        var url = cleanUrl(m[0]);
-
-        if (!url) continue;
-
-        if (isM3u8Url(url)) {
-            pushUnique(hls, url);
-        } else if (
-            /\.(?:mp4|m4v|webm)(?:$|[?#&])/i.test(url)
+        while (
+            (m = re.exec(html || "")) !== null &&
+            objects.length < 30
         ) {
-            pushUnique(mp4, url);
+            let obj = tryParseJson(m[1]);
+
+            if (obj)
+                objects.push(obj);
         }
     }
 
-    // URLs protocol-relative
-    var regex2 =
-        /\/\/[^"'\\<>\s]+\.m3u8[^"'\\<>\s]*/gi;
+    return objects;
+}
 
-    while ((m = regex2.exec(text)) !== null) {
-        var u2 = cleanUrl(m[0]);
+function extractMetadataFromHtml(html) {
+    html = safeStr(html);
 
-        if (u2) {
-            pushUnique(hls, u2);
+    if (!html)
+        return null;
+
+    let options =
+        extractDataOptions(html);
+
+    for (let i = 0; i < options.length; i++) {
+        let found =
+            findMetadataInObject(
+                options[i],
+                0
+            );
+
+        if (found)
+            return found;
+    }
+
+    let objects =
+        extractJsonObjectsFromHtml(html);
+
+    for (let i = 0; i < objects.length; i++) {
+        let found =
+            findMetadataInObject(
+                objects[i],
+                0
+            );
+
+        if (found)
+            return found;
+    }
+
+    return null;
+}
+
+function fetchMetadataUrl(meta, baseUrl) {
+    if (!safeObj(meta))
+        return null;
+
+    let candidates = [
+        meta.metadataUrl,
+        meta.metadataURL,
+
+        meta.flashvars &&
+            meta.flashvars.metadataUrl,
+
+        meta.flashvars &&
+            meta.flashvars.metadataURL
+    ];
+
+    for (let i = 0; i < candidates.length; i++) {
+        let url =
+            normalizeUrl(
+                candidates[i],
+                baseUrl
+            );
+
+        if (!isHttpUrl(url))
+            continue;
+
+        addDebug(
+            "metadataUrl: " + url
+        );
+
+        let body =
+            httpGetAuth(url);
+
+        if (!body)
+            body = httpGet(url);
+
+        let obj =
+            tryParseJson(body);
+
+        if (obj) {
+            return (
+                findMetadataInObject(
+                    obj,
+                    0
+                ) || obj
+            );
         }
     }
+
+    return null;
+}
+
+function parseMetadata(html, pageUrl) {
+    let meta =
+        extractMetadataFromHtml(html);
+
+    if (!meta)
+        return null;
+
+    let fetched =
+        fetchMetadataUrl(
+            meta,
+            pageUrl
+        );
+
+    if (fetched)
+        return fetched;
+
+    return meta;
 }
 
 
-function collectUrlsFromObject(obj, hls, mp4, depth) {
-    if (!obj || depth > MAX_JSON_DEPTH) {
+/* ============================================================
+ * URL EXTRACTION
+ * ============================================================ */
+
+function pushUnique(arr, value) {
+    value = normalizeUrl(value);
+
+    if (!isHttpUrl(value))
+        return;
+
+    if (arr.indexOf(value) >= 0)
+        return;
+
+    if (arr.length >= MAX_SOURCES)
+        return;
+
+    arr.push(value);
+}
+
+function collectUrlsFromString(value, arr) {
+    let s = safeStr(value);
+
+    if (!s)
+        return;
+
+    s = htmlDecode(s)
+        .replace(/\\\//g, "/");
+
+    if (isM3u8Url(s)) {
+        pushUnique(arr, s);
+    }
+
+    let re =
+        /https?:\/\/[^\s"'<>\\]+/gi;
+
+    let m;
+
+    while ((m = re.exec(s)) !== null) {
+        let url =
+            cleanUrl(m[0]);
+
+        if (isM3u8Url(url))
+            pushUnique(arr, url);
+    }
+
+    let proto =
+        /\/\/[^\s"'<>\\]+/g;
+
+    while ((m = proto.exec(s)) !== null) {
+        let url =
+            "https:" + cleanUrl(m[0]);
+
+        if (isM3u8Url(url))
+            pushUnique(arr, url);
+    }
+}
+
+function collectUrlsFromObject(
+    obj,
+    arr,
+    depth
+) {
+    /*
+     * IMPORTANTE:
+     * primero comprobamos strings.
+     * El v5 tenía aquí un bug.
+     */
+
+    if (typeof obj === "string") {
+        collectUrlsFromString(
+            obj,
+            arr
+        );
+
+        return;
+    }
+
+    if (!safeObj(obj))
+        return;
+
+    if (depth > MAX_JSON_DEPTH)
+        return;
+
+    if (arr.length >= MAX_SOURCES)
+        return;
+
+    if (Array.isArray(obj)) {
+        for (let i = 0;
+             i < obj.length;
+             i++) {
+
+            collectUrlsFromObject(
+                obj[i],
+                arr,
+                depth + 1
+            );
+
+            if (
+                arr.length >= MAX_SOURCES
+            )
+                return;
+        }
+
         return;
     }
 
     try {
-        if (typeof obj === "string") {
-            collectUrlsFromString(obj, hls, mp4);
-            return;
-        }
+        for (let key in obj) {
+            let value = obj[key];
 
-        if (typeof obj !== "object") {
-            return;
-        }
-
-        for (var key in obj) {
-            try {
-                var value = obj[key];
-
-                var lower = safeStr(key).toLowerCase();
-
-                if (typeof value === "string") {
-
-                    var url = cleanUrl(value);
-
-                    if (isM3u8Url(url)) {
-                        pushUnique(hls, url);
-                    } else if (
-                        /\.(?:mp4|m4v|webm)(?:$|[?#&])/i.test(url)
-                    ) {
-                        pushUnique(mp4, url);
-                    }
-
-                    // Campos relacionados con video
-                    if (
-                        lower.indexOf("hls") >= 0 ||
-                        lower.indexOf("playlist") >= 0 ||
-                        lower.indexOf("manifest") >= 0 ||
-                        lower.indexOf("stream") >= 0 ||
-                        lower.indexOf("url") >= 0 ||
-                        lower.indexOf("file") >= 0
-                    ) {
-                        collectUrlsFromString(
-                            value,
-                            hls,
-                            mp4
-                        );
-                    }
-
-                } else if (typeof value === "object") {
-
-                    collectUrlsFromObject(
-                        value,
-                        hls,
-                        mp4,
-                        depth + 1
-                    );
-                }
-
-            } catch (ignore) {
+            if (
+                /hls|m3u8|manifest|playlist|stream|video|media|file|url|source/i
+                    .test(key)
+            ) {
+                collectUrlsFromObject(
+                    value,
+                    arr,
+                    depth + 1
+                );
             }
-        }
 
-    } catch (e) {
-        addDebug("Error recorriendo metadata: " + e);
-    }
+            if (safeObj(value)) {
+                collectUrlsFromObject(
+                    value,
+                    arr,
+                    depth + 1
+                );
+            } else if (
+                typeof value === "string"
+            ) {
+                collectUrlsFromString(
+                    value,
+                    arr
+                );
+            }
+
+            if (
+                arr.length >= MAX_SOURCES
+            )
+                return;
+        }
+    } catch (_) {}
 }
 
+function collectHlsUrls(meta) {
+    let urls = [];
 
-// ============================================================
-// HLS FIELD EXTRACTION
-// ============================================================
-
-function collectHlsUrls(metadata) {
-    var hls = [];
-    var mp4 = [];
-
-    if (!metadata) {
-        return {
-            hls: hls,
-            mp4: mp4
-        };
-    }
-
-    // Campos prioritarios conocidos
-    var fields = [
+    let preferred = [
+        "playlistUrl",
         "hlsMasterPlaylistUrl",
         "hlsManifestUrl",
         "hlsUrl",
         "hls_playlist",
         "hls",
-        "hlsUrlMobile",
-        "playlistUrl",
         "manifestUrl",
         "streamUrl",
         "videoUrl",
-        "url",
         "file"
     ];
 
-    for (var i = 0; i < fields.length; i++) {
-        try {
-            var value = metadata[fields[i]];
+    function walk(obj, depth) {
+        if (!safeObj(obj))
+            return;
 
-            if (typeof value === "string") {
-                var url = cleanUrl(value);
+        if (depth > MAX_JSON_DEPTH)
+            return;
 
-                if (isM3u8Url(url)) {
-                    pushUnique(hls, url);
-                } else if (
-                    /\.(?:mp4|m4v|webm)(?:$|[?#&])/i.test(url)
+        if (urls.length >= MAX_SOURCES)
+            return;
+
+        if (Array.isArray(obj)) {
+            for (let i = 0;
+                 i < obj.length;
+                 i++) {
+
+                walk(
+                    obj[i],
+                    depth + 1
+                );
+
+                if (
+                    urls.length >= MAX_SOURCES
+                )
+                    return;
+            }
+
+            return;
+        }
+
+        for (let i = 0;
+             i < preferred.length;
+             i++) {
+
+            let key = preferred[i];
+
+            try {
+                if (
+                    obj[key] !== undefined &&
+                    obj[key] !== null
                 ) {
-                    pushUnique(mp4, url);
+                    collectUrlsFromObject(
+                        obj[key],
+                        urls,
+                        depth + 1
+                    );
+                }
+            } catch (_) {}
+        }
+
+        try {
+            for (let key in obj) {
+                let value = obj[key];
+
+                if (
+                    /hls|m3u8|playlist|manifest/i
+                        .test(key)
+                ) {
+                    collectUrlsFromObject(
+                        value,
+                        urls,
+                        depth + 1
+                    );
                 }
 
-                collectUrlsFromString(
-                    value,
-                    hls,
-                    mp4
+                if (
+                    urls.length >= MAX_SOURCES
+                )
+                    return;
+            }
+        } catch (_) {}
+    }
+
+    walk(meta, 0);
+
+    return urls;
+}
+
+function collectMp4Urls(meta) {
+    let urls = [];
+
+    function scan(value, depth) {
+        /*
+         * Igual que HLS:
+         * strings deben procesarse antes
+         * del chequeo de object.
+         */
+
+        if (typeof value === "string") {
+            let s =
+                htmlDecode(value)
+                    .replace(/\\\//g, "/");
+
+            let re =
+                /https?:\/\/[^\s"'<>\\]+/gi;
+
+            let m;
+
+            while (
+                (m = re.exec(s)) !== null
+            ) {
+                let url =
+                    cleanUrl(m[0]);
+
+                if (isMp4Url(url))
+                    pushUnique(
+                        urls,
+                        url
+                    );
+            }
+
+            return;
+        }
+
+        if (!safeObj(value))
+            return;
+
+        if (depth > MAX_JSON_DEPTH)
+            return;
+
+        if (
+            urls.length >= MAX_SOURCES
+        )
+            return;
+
+        if (Array.isArray(value)) {
+            for (let i = 0;
+                 i < value.length;
+                 i++) {
+
+                scan(
+                    value[i],
+                    depth + 1
                 );
+
+                if (
+                    urls.length >= MAX_SOURCES
+                )
+                    return;
             }
-        } catch (ignore) {
+
+            return;
         }
-    }
 
-    // Recorrido completo
-    collectUrlsFromObject(
-        metadata,
-        hls,
-        mp4,
-        0
-    );
-
-    // Limitar
-    if (hls.length > MAX_SOURCES) {
-        hls = hls.slice(0, MAX_SOURCES);
-    }
-
-    if (mp4.length > MAX_SOURCES) {
-        mp4 = mp4.slice(0, MAX_SOURCES);
-    }
-
-    addDebug(
-        "Fuentes encontradas: HLS=" +
-        hls.length +
-        " MP4=" +
-        mp4.length
-    );
-
-    return {
-        hls: hls,
-        mp4: mp4
-    };
-}
-
-
-// ============================================================
-// METADATA HELPERS
-// ============================================================
-
-function firstValue(obj, keys) {
-    if (!obj) return "";
-
-    for (var i = 0; i < keys.length; i++) {
         try {
-            var v = obj[keys[i]];
+            for (let key in value) {
+                scan(
+                    value[key],
+                    depth + 1
+                );
 
-            if (v != null && safeStr(v).trim()) {
-                return v;
+                if (
+                    urls.length >= MAX_SOURCES
+                )
+                    return;
             }
-        } catch (ignore) {
-        }
+        } catch (_) {}
     }
 
-    return "";
+    scan(meta, 0);
+
+    return urls;
 }
 
 
-function getTitle(metadata, html) {
-    var title = firstValue(metadata, [
-        "movieTitle",
-        "title",
-        "name",
-        "videoTitle",
-        "contentTitle"
-    ]);
+/* ============================================================
+ * METADATA FIELDS
+ * ============================================================ */
 
-    if (title) {
-        return cleanText(title);
-    }
-
-    var patterns = [
-        /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i,
-        /<meta[^>]+name=["']title["'][^>]+content=["']([^"']+)/i,
-        /<title[^>]*>([\s\S]*?)<\/title>/i
-    ];
-
-    for (var i = 0; i < patterns.length; i++) {
-        var m = safeStr(html).match(patterns[i]);
-
-        if (m && m[1]) {
-            return cleanText(m[1])
-                .replace(/\s*-\s*OK\.ru.*$/i, "");
-        }
-    }
-
-    return "Video OK.ru";
-}
-
-
-function getPoster(metadata, html) {
-    var poster = firstValue(metadata, [
-        "poster",
-        "posterUrl",
-        "thumbnail",
-        "thumbnailUrl",
-        "cover",
-        "coverUrl",
-        "image",
-        "imageUrl"
-    ]);
-
-    if (poster) {
-        poster = cleanUrl(poster);
-
-        if (isHttpUrl(poster)) {
-            return poster;
-        }
-    }
-
-    var patterns = [
-        /property=["']og:image["'][^>]+content=["']([^"']+)/i,
-        /name=["']twitter:image["'][^>]+content=["']([^"']+)/i,
-        /["'](?:poster|thumbnail|image)["']\s*:\s*["']([^"']+)/i
-    ];
-
-    for (var i = 0; i < patterns.length; i++) {
-        var m = safeStr(html).match(patterns[i]);
-
-        if (m && m[1]) {
-            var p = cleanUrl(m[1]);
-
-            if (isHttpUrl(p)) {
-                return p;
-            }
-        }
-    }
-
-    return "";
-}
-
-
-function getDuration(metadata) {
-    var d = firstValue(metadata, [
-        "duration",
-        "durationMs",
-        "durationSec",
-        "durationSeconds",
-        "length"
-    ]);
-
-    if (d == null || d === "") {
-        return 0;
-    }
-
-    var n = Number(d);
-
-    if (isNaN(n) || n < 0) {
-        return 0;
-    }
-
-    // Algunos servidores entregan milisegundos
-    if (n > 100000) {
-        n = Math.floor(n / 1000);
-    }
-
-    return Math.floor(n);
-}
-
-
-function getAuthorName(metadata) {
-    var author = firstValue(metadata, [
-        "author",
-        "authorName",
-        "uploader",
-        "ownerName",
-        "userName"
-    ]);
-
-    if (author && typeof author === "object") {
-        author = firstValue(author, [
-            "name",
+function getTitle(meta, fallback) {
+    let title =
+        firstValue(meta, [
             "title",
-            "username"
+            "name",
+            "movieTitle",
+            "videoTitle",
+            "caption"
         ]);
-    }
 
-    return cleanText(author);
+    return (
+        cleanText(title) ||
+        cleanText(fallback) ||
+        "OK.ru video"
+    );
 }
 
+function getPoster(meta) {
+    return normalizeUrl(
+        firstValue(meta, [
+            "poster",
+            "posterUrl",
+            "thumbnail",
+            "thumbnailUrl",
+            "cover",
+            "coverUrl",
+            "image",
+            "imageUrl",
+            "preview"
+        ])
+    );
+}
 
-// ============================================================
-// REQUEST MODIFIER
-// ============================================================
+function getDuration(meta) {
+    if (!safeObj(meta))
+        return 0;
 
-function buildImportOptions() {
-    try {
-        if (typeof httpimp === "undefined") {
-            return null;
+    let candidates = [
+        {
+            key: "durationMs",
+            divide: 1000
+        },
+        {
+            key: "durationSec",
+            divide: 1
+        },
+        {
+            key: "duration",
+            divide: 1
+        },
+        {
+            key: "length",
+            divide: 1
+        },
+        {
+            key: "videoDuration",
+            divide: 1
         }
+    ];
 
-        var opts = {};
-
-        opts.applyAuthClient = "";
-        opts.applyCookieClient = "";
-        opts.applyOtherHeaders = false;
+    for (let i = 0;
+         i < candidates.length;
+         i++) {
 
         try {
-            opts.impersonateTarget = "chrome136";
-        } catch (ignore) {
-        }
+            let c = candidates[i];
 
-        return opts;
+            if (
+                meta[c.key] === undefined ||
+                meta[c.key] === null
+            )
+                continue;
 
-    } catch (e) {
-        return null;
-    }
-}
-
-
-function buildRequestModifier() {
-    var impOpts = buildImportOptions();
-
-    if (!impOpts) {
-        return null;
-    }
-
-    try {
-        return new RequestModifier(
-            impOpts
-        );
-    } catch (e) {
-        return null;
-    }
-}
-
-
-// ============================================================
-// VIDEO SOURCE CREATION
-// ============================================================
-
-function makeHlsSource(url, title) {
-    try {
-        url = normalizeUrl(url);
-
-        if (!url) return null;
-
-        var modifier = buildRequestModifier();
-
-        if (modifier) {
-            try {
-                return new HLSSource(
-                    title || "OK.ru HLS",
-                    url,
-                    modifier
+            let n =
+                parseFloat(
+                    meta[c.key]
                 );
-            } catch (e1) {
+
+            if (!isFinite(n) ||
+                n <= 0)
+                continue;
+
+            if (c.divide !== 1)
+                n = n / c.divide;
+
+            /*
+             * Protección para respuestas
+             * donde duration viene accidentalmente
+             * en milisegundos.
+             */
+            if (
+                c.key === "duration" &&
+                n > 100000
+            ) {
+                n = n / 1000;
             }
-        }
 
-        return new HLSSource(
-            title || "OK.ru HLS",
-            url
-        );
-
-    } catch (e) {
-        addDebug("Error creando HLS: " + e);
-        return null;
+            return Math.round(n);
+        } catch (_) {}
     }
+
+    return 0;
+}
+
+function getAuthorName(meta) {
+    return cleanText(
+        firstValue(meta, [
+            "authorName",
+            "author",
+            "ownerName",
+            "uploader",
+            "userName",
+            "username"
+        ])
+    );
 }
 
 
-function makeMp4Source(url, title) {
-    try {
-        url = normalizeUrl(url);
+/* ============================================================
+ * XUPER METADATA
+ * ============================================================ */
 
-        if (!url) return null;
+function getNestedXuperContainers(meta) {
+    let out = [];
 
-        var modifier = buildRequestModifier();
+    if (!safeObj(meta))
+        return out;
 
-        if (modifier) {
-            try {
-                return new VideoUrlSource(
-                    title || "OK.ru MP4",
-                    url,
-                    modifier
-                );
-            } catch (e1) {
-            }
+    let candidates = [
+        meta,
+        meta.xuper,
+        meta.data,
+        meta.result,
+        meta.auth,
+        meta.player,
+        meta.flashvars,
+        meta.video,
+        meta.metadata
+    ];
+
+    for (let i = 0;
+         i < candidates.length;
+         i++) {
+
+        if (
+            safeObj(candidates[i]) &&
+            out.indexOf(candidates[i]) < 0
+        ) {
+            out.push(
+                candidates[i]
+            );
         }
-
-        return new VideoUrlSource(
-            title || "OK.ru MP4",
-            url
-        );
-
-    } catch (e) {
-        addDebug("Error creando MP4: " + e);
-        return null;
     }
+
+    return out;
+}
+
+function xuperGetPlayParams(meta) {
+    let containers =
+        getNestedXuperContainers(meta);
+
+    for (let i = 0;
+         i < containers.length;
+         i++) {
+
+        let v =
+            firstValue(
+                containers[i],
+                [
+                    "play_params",
+                    "playParams"
+                ]
+            );
+
+        if (v)
+            return v;
+    }
+
+    return "";
+}
+
+function xuperGetVerificationToken(meta) {
+    let containers =
+        getNestedXuperContainers(meta);
+
+    for (let i = 0;
+         i < containers.length;
+         i++) {
+
+        let v =
+            firstValue(
+                containers[i],
+                [
+                    "verificationToken",
+                    "verification_token"
+                ]
+            );
+
+        if (v)
+            return v;
+    }
+
+    return "";
+}
+
+function xuperGetPlaylistUrl(meta) {
+    let containers =
+        getNestedXuperContainers(meta);
+
+    for (let i = 0;
+         i < containers.length;
+         i++) {
+
+        let v =
+            firstValue(
+                containers[i],
+                [
+                    "playlistUrl",
+                    "playlist_url"
+                ]
+            );
+
+        if (isM3u8Url(v))
+            return normalizeUrl(v);
+    }
+
+    return "";
+}
+
+function xuperGetSignature(meta) {
+    let containers =
+        getNestedXuperContainers(meta);
+
+    for (let i = 0;
+         i < containers.length;
+         i++) {
+
+        let v =
+            firstValue(
+                containers[i],
+                [
+                    "signdata",
+                    "signature",
+                    "sign"
+                ]
+            );
+
+        if (v)
+            return v;
+    }
+
+    return "";
+}
+
+function xuperResolve(meta) {
+    /*
+     * No generamos firma.
+     *
+     * Si OK.ru ya entrega playlistUrl,
+     * se utiliza directamente.
+     */
+
+    let playlist =
+        xuperGetPlaylistUrl(meta);
+
+    if (isM3u8Url(playlist))
+        return playlist;
+
+    return "";
 }
 
 
-// ============================================================
-// BUILD VIDEO DETAILS
-// ============================================================
+/* ============================================================
+ * SOURCE CREATION
+ * ============================================================ */
 
-function buildVideoDetails(
-    id,
-    metadata,
-    html,
-    originalUrl
+function makeHlsSource(
+    url,
+    duration,
+    name
 ) {
-    var title = getTitle(metadata, html);
-    var poster = getPoster(metadata, html);
-    var duration = getDuration(metadata);
-    var authorName = getAuthorName(metadata);
+    if (!isM3u8Url(url))
+        return null;
 
-    var urls = collectHlsUrls(metadata);
+    try {
+        return new HLSSource({
+            name:
+                name ||
+                "OK.ru HLS",
 
-    var sources = [];
+            duration:
+                duration || 0,
 
-    // --------------------------------------------------------
-    // HLS primero
-    // --------------------------------------------------------
-
-    for (var i = 0; i < urls.hls.length; i++) {
-
-        if (sources.length >= MAX_SOURCES) {
-            break;
-        }
-
-        var hls = makeHlsSource(
-            urls.hls[i],
-            "OK.ru HLS " + (i + 1)
+            url: url
+        });
+    } catch (e) {
+        addDebug(
+            "HLSSource failed: " + e
         );
-
-        if (hls) {
-            sources.push(hls);
-        }
     }
 
-    // --------------------------------------------------------
-    // MP4 fallback
-    // --------------------------------------------------------
+    return null;
+}
 
-    for (var j = 0; j < urls.mp4.length; j++) {
+function makeMp4Source(
+    url,
+    duration,
+    name
+) {
+    if (!isMp4Url(url))
+        return null;
 
-        if (sources.length >= MAX_SOURCES) {
-            break;
-        }
+    try {
+        return new VideoUrlSource({
+            name:
+                name ||
+                "OK.ru MP4",
 
-        var mp4 = makeMp4Source(
-            urls.mp4[j],
-            "OK.ru MP4 " + (j + 1)
+            width: 0,
+            height: 0,
+            container: "mp4",
+            codec: "",
+            bitrate: 0,
+            duration:
+                duration || 0,
+            url: url
+        });
+    } catch (e) {
+        addDebug(
+            "VideoUrlSource failed: " + e
+        );
+    }
+
+    return null;
+}
+
+
+/* ============================================================
+ * PLATFORM DETAILS
+ * ============================================================ */
+
+function makeThumbnail(url) {
+    if (!isHttpUrl(url))
+        return null;
+
+    try {
+        return new Thumbnail(
+            url,
+            0
+        );
+    } catch (_) {
+        return null;
+    }
+}
+
+function makeAuthor(name) {
+    if (!name)
+        return null;
+
+    try {
+        return new PlatformAuthorLink(
+            new PlatformID(
+                PLATFORM_NAME,
+                name,
+                PLUGIN_ID
+            ),
+            name,
+            "",
+            ""
+        );
+    } catch (_) {}
+
+    try {
+        return new PlatformAuthorLink(
+            name,
+            "",
+            ""
+        );
+    } catch (_) {}
+
+    return null;
+}
+
+function makeVideoDetails(
+    meta,
+    videoId,
+    canonicalUrl
+) {
+    let title =
+        getTitle(
+            meta,
+            "OK.ru video " + videoId
         );
 
-        if (mp4) {
-            sources.push(mp4);
+    let poster =
+        getPoster(meta);
+
+    let duration =
+        getDuration(meta);
+
+    let authorName =
+        getAuthorName(meta);
+
+    let hls = [];
+
+    /*
+     * Primero intentamos playlistUrl real.
+     */
+    let xuperPlaylist =
+        xuperResolve(meta);
+
+    if (isM3u8Url(xuperPlaylist))
+        pushUnique(
+            hls,
+            xuperPlaylist
+        );
+
+    /*
+     * Después las demás URLs HLS.
+     */
+    let normalHls =
+        collectHlsUrls(meta);
+
+    for (let i = 0;
+         i < normalHls.length;
+         i++) {
+
+        pushUnique(
+            hls,
+            normalHls[i]
+        );
+    }
+
+    /*
+     * MP4 queda como fallback.
+     */
+    let mp4 =
+        collectMp4Urls(meta);
+
+    let sources = [];
+
+    for (let i = 0;
+         i < hls.length;
+         i++) {
+
+        let src =
+            makeHlsSource(
+                hls[i],
+                duration,
+                "OK.ru HLS " + (i + 1)
+            );
+
+        if (src)
+            sources.push(src);
+    }
+
+    /*
+     * Solo agregamos MP4 si no tenemos HLS.
+     *
+     * Esto evita que GrayJay/Cast seleccione
+     * accidentalmente un MP4 inferior.
+     */
+    if (sources.length === 0) {
+        for (let i = 0;
+             i < mp4.length;
+             i++) {
+
+            let src =
+                makeMp4Source(
+                    mp4[i],
+                    duration,
+                    "OK.ru MP4 " + (i + 1)
+                );
+
+            if (src)
+                sources.push(src);
         }
     }
 
     if (sources.length === 0) {
         throw new Error(
-            "OK.ru no proporcionó ninguna fuente reproducible"
+            "No playable HLS/MP4 source found"
         );
     }
 
-    addDebug(
-        "Fuentes GrayJay creadas: " +
-        sources.length
-    );
+    let thumbnails = [];
 
-    var description =
-        "Fuente: OK.ru" +
-        "\nID: " + id +
-        "\nFuentes: " + sources.length;
+    let thumbnail =
+        makeThumbnail(poster);
 
-    if (authorName) {
-        description += "\nAutor: " + authorName;
-    }
+    if (thumbnail)
+        thumbnails.push(thumbnail);
 
-    description += debugText();
+    let author =
+        makeAuthor(authorName);
 
-    var thumbnails = [];
-
-    if (poster) {
-        try {
-            thumbnails.push(
-                new Thumbnail(
-                    poster,
-                    0
-                )
-            );
-        } catch (e) {
-            try {
-                thumbnails.push(
-                    new Thumbnail(poster)
-                );
-            } catch (ignore) {
-            }
-        }
-    }
-
-    var author = null;
-
-    if (authorName) {
-        try {
-            author = new PlatformAuthorLink(
-                authorName,
-                ""
-            );
-        } catch (ignore2) {
-        }
-    }
-
-    var descriptor;
-
-    try {
-        descriptor = new VideoSourceDescriptor(
+    let descriptor =
+        new VideoSourceDescriptor(
             sources
         );
-    } catch (e1) {
-        descriptor = new VideoSourceDescriptor(
-            sources,
-            null
+
+    /*
+     * Constructor moderno GrayJay.
+     */
+    try {
+        return new PlatformVideoDetails({
+            id: new PlatformID(
+                PLATFORM_NAME,
+                videoId,
+                PLUGIN_ID
+            ),
+
+            name: title,
+
+            title: title,
+
+            description: "",
+
+            thumbnails: thumbnails,
+
+            thumbnail: poster,
+
+            author: author,
+
+            uploadDate: 0,
+
+            url: canonicalUrl,
+
+            duration: duration,
+
+            viewCount: 0,
+
+            isLive: false,
+
+            video: descriptor,
+
+            videoSources: descriptor
+        });
+    } catch (e) {
+        addDebug(
+            "Modern details failed: " + e
         );
     }
 
-    return new PlatformVideoDetails(
-        title,
-        description,
-        originalUrl,
-        thumbnails,
-        duration,
-        author,
-        descriptor
-    );
+    /*
+     * Fallback para versiones antiguas.
+     */
+    try {
+        return new PlatformVideoDetails(
+            title,
+            "",
+            duration,
+            poster,
+            author,
+            descriptor,
+            thumbnails
+        );
+    } catch (e) {
+        throw new Error(
+            "PlatformVideoDetails failed: " +
+            e +
+            "\n" +
+            debugText()
+        );
+    }
 }
 
 
-// ============================================================
-// SEARCH HTML PARSER
-// ============================================================
+/* ============================================================
+ * SEARCH
+ * ============================================================ */
 
-function extractSearchTitle(block) {
-    var patterns = [
-        /portal_search_name[^>]*title=["']([^"']+)/i,
-        /portal_search_name[^>]*>([\s\S]*?)<\/[^>]+>/i,
-        /data-l=["']([^"']+)["']/i,
-        /title=["']([^"']+)["']/i
-    ];
+function parseDurationText(text) {
+    text = cleanText(text);
 
-    for (var i = 0; i < patterns.length; i++) {
-        var m = block.match(patterns[i]);
+    if (!text)
+        return 0;
 
-        if (m && m[1]) {
-            var t = cleanText(m[1]);
+    let parts =
+        text.split(":");
 
-            if (
-                t &&
-                t.length > 1 &&
-                t.length < 500
-            ) {
-                return t;
-            }
-        }
+    let n = 0;
+
+    if (parts.length === 2) {
+        n =
+            parseInt(parts[0], 10) * 60 +
+            parseInt(parts[1], 10);
+    } else if (parts.length === 3) {
+        n =
+            parseInt(parts[0], 10) * 3600 +
+            parseInt(parts[1], 10) * 60 +
+            parseInt(parts[2], 10);
     }
 
-    return "Video OK.ru";
+    return isFinite(n) ? n : 0;
 }
 
+function extractSearchResults(html) {
+    let results = [];
 
-function extractSearchDuration(block) {
-    var patterns = [
-        /video-card_duration[^>]*>([^<]+)/i,
-        /duration[^>]*>([^<]+)/i,
-        /video-card_duration[^>]*content=["']([^"']+)/i
-    ];
+    let re =
+        /data-movie-id\s*=\s*["']?(\d+)["']?([\s\S]{0,6000}?)(?=data-movie-id|$)/gi;
 
-    for (var i = 0; i < patterns.length; i++) {
-        var m = block.match(patterns[i]);
+    let m;
 
-        if (m && m[1]) {
-            return cleanText(m[1]);
-        }
-    }
+    while (
+        (m = re.exec(html || "")) !== null &&
+        results.length < 30
+    ) {
+        let id = m[1];
+        let block = m[2] || "";
 
-    return "";
-}
-
-
-function extractSearchPoster(block) {
-    var patterns = [
-        /<img[^>]+src=["']([^"']+)["']/i,
-        /poster=["']([^"']+)["']/i,
-        /data-src=["']([^"']+)["']/i,
-        /data-original=["']([^"']+)["']/i
-    ];
-
-    for (var i = 0; i < patterns.length; i++) {
-        var m = block.match(patterns[i]);
-
-        if (m && m[1]) {
-            var p = cleanUrl(m[1]);
-
-            if (
-                isHttpUrl(p) &&
-                !/avatar|icon|logo/i.test(p)
-            ) {
-                return p;
-            }
-        }
-    }
-
-    return "";
-}
-
-
-function parseSearchResults(html) {
-    var results = [];
-
-    if (!html) {
-        return results;
-    }
-
-    var ids = [];
-    var idRegex =
-        /data-movie-id=["'](\d+)["']/gi;
-
-    var m;
-
-    while ((m = idRegex.exec(html)) !== null) {
-
-        var id = m[1];
-
-        var duplicate = false;
-
-        for (var x = 0; x < ids.length; x++) {
-            if (ids[x] === id) {
-                duplicate = true;
-                break;
-            }
-        }
-
-        if (!duplicate) {
-            ids.push(id);
-        }
-
-        if (ids.length >= 100) {
-            break;
-        }
-    }
-
-    addDebug(
-        "Resultados encontrados en HTML: " +
-        ids.length
-    );
-
-    for (var i = 0; i < ids.length; i++) {
-
-        var videoId = ids[i];
-
-        var pos = html.indexOf(
-            'data-movie-id="' + videoId + '"'
-        );
-
-        if (pos < 0) {
-            pos = html.indexOf(
-                "data-movie-id='" + videoId + "'"
-            );
-        }
-
-        if (pos < 0) {
-            continue;
-        }
-
-        var start = Math.max(
-            0,
-            pos - 5000
-        );
-
-        var end = Math.min(
-            html.length,
-            pos + 10000
-        );
-
-        var block = html.substring(
-            start,
-            end
-        );
-
-        var title = extractSearchTitle(block);
-        var duration = extractSearchDuration(block);
-        var poster = extractSearchPoster(block);
-
-        var url =
-            "https://ok.ru/video/" +
-            videoId;
+        let title = "";
+        let poster = "";
+        let duration = 0;
 
         try {
-            var thumbs = [];
+            let tm =
+                block.match(
+                    /(?:data-title|title)\s*=\s*["']([^"']+)["']/i
+                );
 
-            if (poster) {
-                try {
-                    thumbs.push(
-                        new Thumbnail(
-                            poster,
-                            0
-                        )
+            if (tm)
+                title =
+                    cleanText(tm[1]);
+        } catch (_) {}
+
+        if (!title) {
+            try {
+                let tm =
+                    block.match(
+                        /<(?:span|div|a)[^>]*class=["'][^"']*(?:title|name)[^"']*["'][^>]*>([\s\S]{1,700}?)<\/(?:span|div|a)>/i
                     );
-                } catch (e1) {
-                    try {
-                        thumbs.push(
-                            new Thumbnail(poster)
+
+                if (tm)
+                    title =
+                        cleanText(tm[1]);
+            } catch (_) {}
+        }
+
+        try {
+            let pm =
+                block.match(
+                    /(?:poster|thumbnail|data-poster|data-options)[^=]*=\s*["']([^"']+)["']/i
+                );
+
+            if (pm) {
+                let candidate =
+                    cleanUrl(pm[1]);
+
+                if (
+                    /\.jpg|\.jpeg|\.png|\.webp/i
+                        .test(candidate)
+                ) {
+                    poster =
+                        normalizeUrl(
+                            candidate
                         );
-                    } catch (e2) {
-                    }
                 }
             }
+        } catch (_) {}
 
-            var details = new PlatformVideoDetails(
-                title,
-                duration
-                    ? "Duración: " + duration
-                    : "Video de OK.ru",
-                url,
-                thumbs,
-                0,
-                null,
-                null
-            );
+        try {
+            let dm =
+                block.match(
+                    /(?:duration|movie-duration)[^>]*>([^<]{1,30})</i
+                );
 
-            results.push(details);
+            if (dm)
+                duration =
+                    parseDurationText(
+                        dm[1]
+                    );
+        } catch (_) {}
 
-        } catch (e) {
-            addDebug(
-                "Error creando resultado " +
-                videoId +
-                ": " +
-                e
-            );
+        let url =
+            "https://ok.ru/video/" +
+            id;
+
+        let video = null;
+
+        try {
+            video =
+                new PlatformVideo({
+                    id: new PlatformID(
+                        PLATFORM_NAME,
+                        id,
+                        PLUGIN_ID
+                    ),
+
+                    name:
+                        title ||
+                        "OK.ru video " + id,
+
+                    thumbnails:
+                        poster
+                            ? new Thumbnails([
+                                new Thumbnail(
+                                    poster,
+                                    0
+                                )
+                            ])
+                            : new Thumbnails([]),
+
+                    author: null,
+
+                    uploadDate: 0,
+
+                    url: url,
+
+                    duration: duration,
+
+                    viewCount: 0,
+
+                    isLive: false
+                });
+        } catch (_) {}
+
+        if (video) {
+            results.push(video);
+        } else {
+            /*
+             * Fallback compatible con implementaciones
+             * que todavía aceptan objetos simples.
+             */
+            results.push({
+                id: id,
+                url: url,
+                name:
+                    title ||
+                    "OK.ru video " + id,
+
+                title:
+                    title ||
+                    "OK.ru video " + id,
+
+                thumbnail: poster,
+
+                duration: duration
+            });
         }
     }
 
     return results;
 }
 
+function searchOk(query) {
+    let q =
+        safeStr(query).trim();
 
-// ============================================================
-// SEARCH
-// ============================================================
+    if (!q)
+        return [];
 
-function doSearch(query) {
-    resetDebug();
-
-    query = safeStr(query).trim();
-
-    if (!query) {
-        return new VideoPager(
-            [],
-            false,
-            {}
-        );
-    }
-
-    addDebug(
-        "Buscando: " + query
-    );
-
-    var url =
+    let url =
         SEARCH_URL_BASE +
-        encodeURIComponent(query);
+        encodeURIComponent(q);
 
-    var html = httpGetAuthenticated(url);
+    let html =
+        httpGetAuth(url);
 
-    if (!html || html.length < 500) {
-        addDebug(
-            "Auth search no devolvió contenido útil"
+    if (!html)
+        html = httpGet(url);
+
+    if (!html)
+        throw new Error(
+            "OK.ru search returned no data"
         );
 
-        html = httpGet(url, {
-            "Accept":
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language":
-                "es-ES,es;q=0.9,en;q=0.8",
-            "Referer":
-                "https://ok.ru/"
-        });
-    }
-
-    var results = parseSearchResults(html);
-
-    addDebug(
-        "Resultados finales: " +
-        results.length
-    );
-
-    return new VideoPager(
-        results,
-        false,
-        {}
+    return extractSearchResults(
+        html
     );
 }
 
+function makeVideoPager(results) {
+    try {
+        return new VideoPager(
+            results,
+            false,
+            null
+        );
+    } catch (_) {}
 
-// ============================================================
-// CONTENT DETAILS
-// ============================================================
+    return results;
+}
+
+
+/* ============================================================
+ * DETAILS
+ * ============================================================ */
 
 function doDetails(url) {
     resetDebug();
 
-    var id = extractVideoId(url);
+    let videoId =
+        extractVideoId(url);
 
-    if (!id) {
+    if (!videoId) {
         throw new Error(
-            "No se pudo obtener el ID del video OK.ru"
+            "Invalid OK.ru video URL"
+        );
+    }
+
+    let canonical =
+        "https://ok.ru/video/" +
+        videoId;
+
+    addDebug(
+        "Video ID: " + videoId
+    );
+
+    let html =
+        loadOkPage(canonical);
+
+    if (!html) {
+        throw new Error(
+            "Unable to load OK.ru video page"
+        );
+    }
+
+    let meta =
+        parseMetadata(
+            html,
+            canonical
+        );
+
+    if (!meta) {
+        throw new Error(
+            "OK.ru metadata not found.\n\n" +
+            debugText()
         );
     }
 
     addDebug(
-        "Video ID: " + id
+        "Xuper fields: " +
+        "play_params=" +
+        (xuperGetPlayParams(meta)
+            ? "yes"
+            : "no") +
+        ", verificationToken=" +
+        (xuperGetVerificationToken(meta)
+            ? "yes"
+            : "no") +
+        ", playlistUrl=" +
+        (xuperGetPlaylistUrl(meta)
+            ? "yes"
+            : "no") +
+        ", signdata=" +
+        (xuperGetSignature(meta)
+            ? "yes"
+            : "no")
     );
 
-    var html = loadOkVideoPage(id);
-
-    if (!html) {
-        throw new Error(
-            "No se pudo cargar el video"
-        );
-    }
-
-    // --------------------------------------------------------
-    // Detectar embeds externos
-    // --------------------------------------------------------
-
-    var hasYoutube =
-        /youtube(?:-nocookie)?\.com|youtu\.be/i.test(html);
-
-    var hasVimeo =
-        /vimeo\.com/i.test(html);
-
-    if (hasYoutube) {
-        addDebug(
-            "La página contiene referencia a YouTube"
-        );
-    }
-
-    if (hasVimeo) {
-        addDebug(
-            "La página contiene referencia a Vimeo"
-        );
-    }
-
-    // IMPORTANTE:
-    // No rechazamos aquí.
-    // Primero intentamos extraer fuentes reales OK.ru.
-    // --------------------------------------------------------
-
-    var metadata =
-        parseMetadata(html);
-
-    if (!metadata) {
-        throw new Error(
-            "No se pudo extraer la metadata del video"
-        );
-    }
-
-    return buildVideoDetails(
-        id,
-        metadata,
-        html,
-        url
+    return makeVideoDetails(
+        meta,
+        videoId,
+        canonical
     );
 }
 
 
-// ============================================================
-// HOME
-// ============================================================
+/* ============================================================
+ * SEARCH SUGGESTIONS
+ * ============================================================ */
 
-function doHome() {
-    return new VideoPager(
-        [],
-        false,
-        {}
-    );
-}
+function searchSuggestions(query) {
+    let out = [];
 
-
-// ============================================================
-// SUGGESTIONS
-// ============================================================
-
-function doSuggestions(query) {
-    query = safeStr(query).trim();
-
-    if (!query) {
-        return [];
-    }
-
-    // OK.ru no necesita una segunda petición.
-    // GrayJay puede utilizar el texto directamente.
-    return [query];
-}
-
-
-// ============================================================
-// CHANNEL
-// ============================================================
-
-function isChannelUrl(url) {
-    url = safeStr(url).toLowerCase();
-
-    if (!url) return false;
-
-    if (url.indexOf("ok.ru/group/") >= 0) {
-        return true;
-    }
-
-    if (url.indexOf("ok.ru/profile/") >= 0) {
-        return true;
-    }
-
-    return false;
-}
-
-
-// ============================================================
-// SETTINGS
-// ============================================================
-
-function setSettings(settings) {
     try {
-        _settings = settings || {};
-    } catch (e) {
-        _settings = {};
-    }
-}
+        let results =
+            searchOk(query);
 
+        for (
+            let i = 0;
+            i < results.length &&
+            out.length < 10;
+            i++
+        ) {
+            let r = results[i];
 
-// ============================================================
-// GRAYJAY BINDINGS
-// ============================================================
+            let title = "";
 
-source.setSettings = function(settings) {
-    setSettings(settings);
-};
+            try {
+                title =
+                    r.name ||
+                    r.title ||
+                    "";
+            } catch (_) {}
 
-
-source.enable = function(pluginId) {
-    try {
-        PLUGIN_ID = pluginId || "";
-    } catch (e) {
-        PLUGIN_ID = "";
-    }
-};
-
-
-source.getSearchCapabilities = function() {
-    try {
-        return {
-            supportsSearch: true,
-            supportsSuggestions: true
-        };
-    } catch (e) {
-        return {};
-    }
-};
-
-
-source.search = function(query) {
-    try {
-        return doSearch(query);
-    } catch (e) {
-
-        resetDebug();
-
-        addDebug(
-            "Search exception: " + e
-        );
-
-        return new VideoPager(
-            [],
-            false,
-            {}
-        );
-    }
-};
-
-
-source.searchSuggestions = function(query) {
-    try {
-        return doSuggestions(query);
-    } catch (e) {
-        return [];
-    }
-};
-
-
-source.isContentDetailsUrl = function(url) {
-    return REGEX_VIDEO_URL.test(
-        safeStr(url)
-    );
-};
-
-
-source.isVideoDetailsUrl = function(url) {
-    return REGEX_VIDEO_URL.test(
-        safeStr(url)
-    );
-};
-
-
-source.getVideoDetails = function(url) {
-    try {
-        return doDetails(url);
-    } catch (e) {
-
-        var message =
-            "No se pudo reproducir el video de OK.ru.\n\n" +
-            "Error: " +
-            safeStr(e);
-
-        try {
-            message += debugText();
-        } catch (ignore) {
+            if (title)
+                out.push(
+                    cleanText(title)
+                );
         }
-
+    } catch (e) {
         addDebug(
-            "getVideoDetails error: " +
-            e
-        );
-
-        return new PlatformVideoDetails(
-            "OK.ru - Error",
-            message,
-            url,
-            [],
-            0,
-            null,
-            null
+            "suggestions: " + e
         );
     }
-};
+
+    return out;
+}
 
 
-source.getContentDetails = function(url) {
-    try {
-        return doDetails(url);
-    } catch (e) {
+/* ============================================================
+ * GRAYJAY API
+ * ============================================================ */
 
-        var message =
-            "OK.ru no pudo obtener el contenido.\n\n" +
-            "Error: " +
-            safeStr(e);
+source.setSettings =
+    function (settings) {
+        /*
+         * Actualmente no necesitamos
+         * configuración adicional.
+         */
+    };
 
+source.enable =
+    function () {
+        return true;
+    };
+
+source.disable =
+    function () {
+        return true;
+    };
+
+source.getSearchCapabilities =
+    function () {
         try {
-            message += debugText();
-        } catch (ignore) {
+            return new PlatformSearchCapabilities(
+                true,
+                true,
+                false,
+                false
+            );
+        } catch (_) {
+            try {
+                return new ResultCapabilities(
+                    ["Video"],
+                    [],
+                    []
+                );
+            } catch (_) {}
+
+            return {
+                search: true,
+                suggestions: true
+            };
         }
+    };
 
-        return new PlatformVideoDetails(
-            "OK.ru - Error",
-            message,
-            url,
-            [],
-            0,
-            null,
-            null
+source.search =
+    function (query) {
+        return makeVideoPager(
+            searchOk(query)
         );
-    }
-};
+    };
 
-
-source.getHome = function() {
-    try {
-        return doHome();
-    } catch (e) {
-        return new VideoPager(
-            [],
-            false,
-            {}
+source.searchSuggestions =
+    function (query) {
+        return searchSuggestions(
+            query
         );
-    }
-};
+    };
+
+source.isContentDetailsUrl =
+    function (url) {
+        return REGEX_VIDEO_URL.test(
+            safeStr(url)
+        );
+    };
+
+source.isVideoDetailsUrl =
+    function (url) {
+        return REGEX_VIDEO_URL.test(
+            safeStr(url)
+        );
+    };
+
+source.getVideoDetails =
+    function (url) {
+        return doDetails(url);
+    };
+
+source.getContentDetails =
+    function (url) {
+        return doDetails(url);
+    };
+
+source.getHome =
+    function () {
+        return makeVideoPager([]);
+    };
+
+source.isChannelUrl =
+    function () {
+        return false;
+    };
 
 
-source.isChannelUrl = function(url) {
-    return isChannelUrl(url);
-};
-
-
-// ============================================================
-// FIN
-// ============================================================
+/* ============================================================
+ * END
+ * ============================================================ */
