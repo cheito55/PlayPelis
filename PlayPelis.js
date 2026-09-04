@@ -1,72 +1,74 @@
 /*
- * GrayJay - OK.ru Source v8
- * Optimizado para:
- * - OK.ru desktop/mobile/embed
- * - HLS + MP4/M4V/WebM reales
- * - extracción tolerante de JSON/data-options/flashvars
- * - escaneo directo de URLs dentro del HTML
- * - HLS prioritario
- * - MP4 como fallback
- * - Cast/FCast: fuentes directas, sin RequestModifier
- * - búsqueda y sugerencias
+ * GrayJay - OK.ru Source v9
  *
- * XuperTv:
- * Se reconocen play_params, playlistUrl, verificationToken y signdata
- * únicamente si aparecen realmente en los datos obtenidos.
+ * Objetivos:
+ *  - Extraccion robusta OK.ru desktop/mobile.
+ *  - HLS primero, con varias alternativas reales cuando OK.ru las expone.
+ *  - MP4/M4V como fallback real, no como URL inventada.
+ *  - Fuentes construidas con la API actual de GrayJay (objetos).
+ *  - URLs directas: evita entregar paginas intermedias a Cast.
+ *  - Busqueda y sugerencias.
+ *  - Parseo tolerante de JSON, data-options, flashvars y metadataUrl.
+ *  - Reconocimiento de los campos encontrados en el APK de XuperTv.
  *
- * NO se inventa ninguna firma/token de XuperTv.
+ * IMPORTANTE SOBRE XUPER:
+ * El APK real contiene los modelos/campos play_params, playlistUrl,
+ * verificationToken y signdata. El analisis DEX muestra que son datos de
+ * beans de request/result y que /startPlayVOD forma parte del flujo de VOD.
+ * No se debe inventar una firma local ni un endpoint privado. Este plugin
+ * consume playlistUrl/play_url/media_url cuando OK.ru o los metadatos ya los
+ * entregan. El resolver privado no se simula.
  */
 
 const PLATFORM_NAME = "OK.ru";
 const PLUGIN_ID = "62af0e2f-bfd9-489f-afe1-f66583d2f7d0";
-
-const VIDEO_RE = /(?:https?:\/\/)?(?:www\.|m\.)?ok\.ru\/(?:video|videoembed)\/(\d+)/i;
-
-const SEARCH_URL =
+const REGEX_VIDEO_URL = /ok\.ru\/(?:video|videoembed)\/(\d+)/i;
+const SEARCH_URL_BASE =
     "https://ok.ru/dk?st.cmd=searchResult&st.mode=Movie&st.grmode=Groups&st.query=";
 
-const MAX_HTML = 5000000;
-const MAX_DEPTH = 14;
+const MAX_HTML_SIZE = 5000000;
+const MAX_JSON_DEPTH = 14;
 const MAX_SOURCES = 24;
 const MAX_SEARCH = 20;
-const MAX_DEBUG = 50;
+const MAX_DEBUG = 60;
 
 const UA_DESKTOP =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-    "Chrome/136.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 const UA_MOBILE =
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
-    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-    "Chrome/136.0.0.0 Mobile Safari/537.36";
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36";
 
 let DEBUG = [];
 
-
-/* ============================================================
- * UTILIDADES
- * ========================================================== */
-
-function str(v) {
+function safeStr(v) {
     try {
         if (v === null || v === undefined) return "";
-        return typeof v === "string" ? v : String(v);
+        if (typeof v === "string") return v;
+        return String(v);
     } catch (_) {
         return "";
     }
 }
 
-function obj(v) {
+function safeObj(v) {
     return v !== null && typeof v === "object";
 }
 
-function debug(v) {
+function addDebug(v) {
     try {
-        let s = str(v);
+        let s = safeStr(v);
         if (!s) return;
-        if (s.length > 600) s = s.substring(0, 600) + "...";
-        if (DEBUG.length >= MAX_DEBUG) DEBUG.shift();
+
+        if (s.length > 700) {
+            s = s.substring(0, 700) + "…";
+        }
+
+        if (DEBUG.length >= MAX_DEBUG) {
+            DEBUG.shift();
+        }
+
         DEBUG.push(s);
     } catch (_) {}
 }
@@ -75,12 +77,14 @@ function resetDebug() {
     DEBUG = [];
 }
 
-function debugDump() {
+function debugText() {
     return DEBUG.join("\n");
 }
 
-function decodeHtml(s) {
-    return str(s)
+function htmlDecode(s) {
+    s = safeStr(s);
+
+    return s
         .replace(/&quot;/gi, '"')
         .replace(/&#34;/g, '"')
         .replace(/&#39;/g, "'")
@@ -88,113 +92,122 @@ function decodeHtml(s) {
         .replace(/&amp;/gi, "&")
         .replace(/&lt;/gi, "<")
         .replace(/&gt;/gi, ">")
-        .replace(/&#x2f;/gi, "/")
+        .replace(/&#x2F;/gi, "/")
         .replace(/&#47;/g, "/")
-        .replace(/&#x3d;/gi, "=")
-        .replace(/&#61;/g, "=")
-        .replace(/&#x3a;/gi, ":")
-        .replace(/&#58;/g, ":");
+        .replace(/&#x3D;/gi, "=")
+        .replace(/&#61;/g, "=");
 }
 
 function cleanText(s) {
-    return decodeHtml(str(s))
-        .replace(/<[^>]*>/g, " ")
+    return htmlDecode(safeStr(s).replace(/<[^>]*>/g, " "))
         .replace(/\\n/g, " ")
         .replace(/\s+/g, " ")
         .trim();
 }
 
 function cleanUrl(s) {
-    return decodeHtml(str(s))
-        .replace(/\\u002F/gi, "/")
-        .replace(/\\u002f/gi, "/")
-        .replace(/\\u003A/gi, ":")
-        .replace(/\\u003a/gi, ":")
-        .replace(/\\u003D/gi, "=")
-        .replace(/\\u003d/gi, "=")
-        .replace(/\\\//g, "/")
+    return htmlDecode(safeStr(s))
         .replace(/^\s*["']+|["']+\s*$/g, "")
+        .replace(/\\\//g, "/")
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u003A/gi, ":")
+        .replace(/\\u003D/gi, "=")
         .trim();
-}
-
-function httpUrl(s) {
-    return /^https?:\/\//i.test(cleanUrl(s));
-}
-
-function hlsUrl(s) {
-    return /\.m3u8(?:$|[?#])/i.test(cleanUrl(s));
-}
-
-function mediaUrl(s) {
-    return /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i.test(cleanUrl(s));
 }
 
 function normalizeUrl(s, base) {
     s = cleanUrl(s);
+
     if (!s) return "";
 
-    if (s.indexOf("//") === 0)
+    if (s.indexOf("//") === 0) {
         return "https:" + s;
+    }
 
-    if (/^https?:\/\//i.test(s))
+    if (/^https?:\/\//i.test(s)) {
         return s;
+    }
 
     if (base && s.charAt(0) === "/") {
-        let m = str(base).match(/^(https?:\/\/[^/]+)/i);
-        if (m) return m[1] + s;
+        let m = safeStr(base).match(/^(https?:\/\/[^/]+)/i);
+
+        if (m) {
+            return m[1] + s;
+        }
     }
 
     return s;
 }
 
-function host(url) {
-    let m = str(url).match(/^https?:\/\/([^/]+)/i);
+function isHttpUrl(s) {
+    return /^https?:\/\//i.test(cleanUrl(s));
+}
+
+function isHlsUrl(s) {
+    return /\.m3u8(?:$|[?#])/i.test(cleanUrl(s));
+}
+
+function isMp4Url(s) {
+    return /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i.test(cleanUrl(s));
+}
+
+function hostOf(url) {
+    let m = safeStr(url).match(/^https?:\/\/([^/]+)/i);
     return m ? m[1].toLowerCase() : "";
 }
 
-function videoId(url) {
-    let m = str(url).match(VIDEO_RE);
+function isExternalProvider(url) {
+    let h = hostOf(url);
+
+    return !!h &&
+        /(?:youtube\.com|youtu\.be|vimeo\.com)$/i.test(h);
+}
+
+function extractVideoId(url) {
+    let m = safeStr(url).match(REGEX_VIDEO_URL);
     return m ? m[1] : "";
 }
 
-function externalProvider(url) {
-    let h = host(url);
-    return /(?:youtube\.com|youtu\.be|vimeo\.com)$/i.test(h);
-}
+function mergeHeaders(dst, src) {
+    dst = dst || {};
 
-
-/* ============================================================
- * HTTP
- * ========================================================== */
-
-function headers(extra) {
-    let h = {
-        "User-Agent": UA_DESKTOP,
-        "Accept":
-            "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
-    };
-
-    if (obj(extra)) {
-        for (let k in extra) {
-            if (extra[k] !== null && extra[k] !== undefined) {
-                let v = str(extra[k]);
-                if (v) h[k] = v;
-            }
-        }
+    if (!safeObj(src)) {
+        return dst;
     }
 
-    return h;
+    try {
+        for (let k in src) {
+            if (src[k] !== null && src[k] !== undefined) {
+                let v = safeStr(src[k]);
+
+                if (v) {
+                    dst[k] = v;
+                }
+            }
+        }
+    } catch (_) {}
+
+    return dst;
 }
 
-function GET(url, extra) {
+function httpGet(url, extraHeaders) {
     try {
-        if (!url) return "";
+        let headers = {
+            "User-Agent": UA_DESKTOP,
+            "Accept":
+                "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        };
 
-        let r = http.GET(url, headers(extra));
-        if (!r) return "";
+        mergeHeaders(headers, extraHeaders);
+
+        let r = http.GET(url, headers);
+
+        if (!r) {
+            return "";
+        }
 
         let body = "";
 
@@ -208,65 +221,89 @@ function GET(url, extra) {
             } catch (_) {}
         }
 
-        body = str(body);
+        body = safeStr(body);
 
-        if (body.length > MAX_HTML)
-            body = body.substring(0, MAX_HTML);
+        if (body.length > MAX_HTML_SIZE) {
+            body = body.substring(0, MAX_HTML_SIZE);
+        }
 
         return body;
     } catch (e) {
-        debug("GET " + e);
+        addDebug("GET: " + e);
         return "";
     }
 }
 
-function loadPage(url) {
-    let id = videoId(url);
+function httpGetAuth(url, extraHeaders) {
+    /*
+     * En GrayJay, http.GET utiliza el cliente autenticado cuando el plugin
+     * esta habilitado. Se mantiene separado para poder cambiar la estrategia
+     * sin duplicar el parser.
+     */
+    return httpGet(url, extraHeaders);
+}
 
-    let pages = [
+function loadOkPage(url) {
+    let id = extractVideoId(url);
+
+    let urls = [
         url,
         id ? "https://m.ok.ru/video/" + id : "",
         id ? "https://ok.ru/videoembed/" + id : ""
     ];
 
-    let uas = [UA_DESKTOP, UA_MOBILE];
+    let uas = [
+        UA_DESKTOP,
+        UA_MOBILE
+    ];
 
-    for (let i = 0; i < pages.length; i++) {
-        if (!pages[i]) continue;
+    for (let i = 0; i < urls.length; i++) {
+        if (!urls[i]) {
+            continue;
+        }
 
         for (let j = 0; j < uas.length; j++) {
-            let body = GET(pages[i], {
-                "User-Agent": uas[j],
-                "Referer": "https://ok.ru/"
-            });
+            try {
+                let body = httpGetAuth(
+                    urls[i],
+                    {
+                        "User-Agent": uas[j]
+                    }
+                );
 
-            if (body && body.length > 250) {
-                debug("page=" + i + " ua=" + j + " len=" + body.length);
-                return body;
-            }
+                if (body && body.length > 250) {
+                    addDebug(
+                        "page=" + i +
+                        ",ua=" + j +
+                        ",len=" + body.length
+                    );
+
+                    return body;
+                }
+            } catch (_) {}
         }
     }
 
     return "";
 }
 
-
-/* ============================================================
- * JSON
- * ========================================================== */
-
-function parseJson(value) {
-    if (obj(value)) return value;
+function tryParseJson(value) {
+    if (safeObj(value)) {
+        return value;
+    }
 
     let s = cleanUrl(value);
-    if (!s) return null;
 
-    for (let i = 0; i < 7; i++) {
+    if (!s) {
+        return null;
+    }
+
+    for (let i = 0; i < 6; i++) {
         try {
             return JSON.parse(s);
         } catch (_) {}
 
-        let d = decodeHtml(s);
+        let d = htmlDecode(s);
 
         if (d !== s) {
             s = d;
@@ -274,8 +311,10 @@ function parseJson(value) {
         }
 
         if (
-            (s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') ||
-            (s.charAt(0) === "'" && s.charAt(s.length - 1) === "'")
+            (s.charAt(0) === '"' &&
+                s.charAt(s.length - 1) === '"') ||
+            (s.charAt(0) === "'" &&
+                s.charAt(s.length - 1) === "'")
         ) {
             s = s.substring(1, s.length - 1);
             continue;
@@ -297,42 +336,29 @@ function parseJson(value) {
     return null;
 }
 
-function dataOptions(html) {
+function extractDataOptions(html) {
     let out = [];
     let re = /data-options\s*=\s*["']([\s\S]*?)["']/gi;
     let m;
 
-    while ((m = re.exec(html)) !== null && out.length < 25) {
-        let o = parseJson(m[1]);
-        if (o) out.push(o);
-    }
+    while (
+        (m = re.exec(html)) !== null &&
+        out.length < 20
+    ) {
+        let o = tryParseJson(m[1]);
 
-    return out;
-}
-
-function scriptJson(html) {
-    let out = [];
-
-    let patterns = [
-        /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi,
-        /<script[^>]*>([\s\S]*?\{[\s\S]*?\}[\s\S]*?)<\/script>/gi
-    ];
-
-    for (let p = 0; p < patterns.length; p++) {
-        let re = patterns[p];
-        let m;
-
-        while ((m = re.exec(html)) !== null && out.length < 40) {
-            let o = parseJson(m[1]);
-            if (o) out.push(o);
+        if (o) {
+            out.push(o);
         }
     }
 
     return out;
 }
 
-function looksVideo(o) {
-    if (!obj(o)) return false;
+function looksLikeVideoObject(o) {
+    if (!safeObj(o)) {
+        return false;
+    }
 
     let keys = [
         "hls",
@@ -344,11 +370,8 @@ function looksVideo(o) {
         "videoUrl",
         "video_url",
         "play_url",
-        "playUrl",
         "media_url",
-        "mediaUrl",
         "source_url",
-        "sourceUrl",
         "file",
         "url",
         "play_params",
@@ -359,66 +382,95 @@ function looksVideo(o) {
 
     for (let i = 0; i < keys.length; i++) {
         try {
-            if (o[keys[i]] !== undefined && o[keys[i]] !== null)
+            if (
+                o[keys[i]] !== undefined &&
+                o[keys[i]] !== null
+            ) {
                 return true;
+            }
         } catch (_) {}
     }
 
     return false;
 }
 
-function findVideoObject(root, depth) {
-    if (!obj(root) || depth > MAX_DEPTH)
+function findMetadataInObject(root, depth) {
+    if (
+        !safeObj(root) ||
+        depth > MAX_JSON_DEPTH
+    ) {
         return null;
+    }
 
-    if (looksVideo(root))
+    if (looksLikeVideoObject(root)) {
         return root;
+    }
 
     if (Array.isArray(root)) {
         for (let i = 0; i < root.length; i++) {
-            let r = findVideoObject(root[i], depth + 1);
-            if (r) return r;
+            let found = findMetadataInObject(
+                root[i],
+                depth + 1
+            );
+
+            if (found) {
+                return found;
+            }
         }
 
         return null;
     }
 
-    let preferred = [
-        "video",
-        "movie",
-        "player",
-        "flashvars",
-        "data",
-        "result",
-        "response",
-        "media",
-        "content"
-    ];
-
     try {
+        let preferred = [
+            "video",
+            "movie",
+            "player",
+            "flashvars",
+            "data",
+            "result",
+            "response",
+            "media",
+            "content"
+        ];
+
         for (let i = 0; i < preferred.length; i++) {
             if (root[preferred[i]] !== undefined) {
-                let r = findVideoObject(
+                let found = findMetadataInObject(
                     root[preferred[i]],
                     depth + 1
                 );
 
-                if (r) return r;
+                if (found) {
+                    return found;
+                }
             }
         }
 
         for (let k in root) {
             let v = root[k];
 
-            if (obj(v)) {
-                let r2 = findVideoObject(v, depth + 1);
-                if (r2) return r2;
+            if (safeObj(v)) {
+                let found = findMetadataInObject(
+                    v,
+                    depth + 1
+                );
+
+                if (found) {
+                    return found;
+                }
             } else if (typeof v === "string") {
-                let parsed = parseJson(v);
+                let parsed = tryParseJson(v);
 
                 if (parsed) {
-                    let r3 = findVideoObject(parsed, depth + 1);
-                    if (r3) return r3;
+                    let found2 = findMetadataInObject(
+                        parsed,
+                        depth + 1
+                    );
+
+                    if (found2) {
+                        return found2;
+                    }
                 }
             }
         }
@@ -427,20 +479,64 @@ function findVideoObject(root, depth) {
     return null;
 }
 
-function metadata(html) {
-    let d = dataOptions(html);
+function extractJsonObjectsFromHtml(html) {
+    let out = [];
 
-    for (let i = 0; i < d.length; i++) {
-        let r = findVideoObject(d[i], 0);
-        if (r) return r;
+    let patterns = [
+        /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi,
+        /<script[^>]*>([\s\S]*?\{[\s\S]*?\}[\s\S]*?)<\/script>/gi
+    ];
+
+    for (let p = 0; p < patterns.length; p++) {
+        let re = patterns[p];
+        let m;
+
+        while (
+            (m = re.exec(html)) !== null &&
+            out.length < 40
+        ) {
+            let o = tryParseJson(m[1]);
+
+            if (o) {
+                out.push(o);
+            }
+        }
     }
 
-    let s = scriptJson(html);
+    return out;
+}
 
-    for (let i = 0; i < s.length; i++) {
-        let r2 = findVideoObject(s[i], 0);
-        if (r2) return r2;
+function extractMetadataFromHtml(html) {
+    let dataOptions = extractDataOptions(html);
+
+    for (let i = 0; i < dataOptions.length; i++) {
+        let found = findMetadataInObject(
+            dataOptions[i],
+            0
+        );
+
+        if (found) {
+            return found;
+        }
     }
+
+    let jsons = extractJsonObjectsFromHtml(html);
+
+    for (let i = 0; i < jsons.length; i++) {
+        let found2 = findMetadataInObject(
+            jsons[i],
+            0
+        );
+
+        if (found2) {
+            return found2;
+        }
+    }
+
+    /*
+     * OK.ru changes its markup frequently. A media-bearing object is useful,
+     * but a page-wide URL scan below is the final playback fallback.
+     */
 
     let attrs = [
         "flashvars",
@@ -453,183 +549,358 @@ function metadata(html) {
     for (let i = 0; i < attrs.length; i++) {
         let re = new RegExp(
             attrs[i] +
-            "\\s*=\\s*(?:\"([\\s\\S]*?)\"|'([\\s\\S]*?)')",
+            "\\s*=\\s*(?:\"([\\s\\S]*?)\"|\'([\\s\\S]*?)\')",
             "i"
         );
 
         let m = html.match(re);
 
         if (m) {
-            let o = parseJson(m[1] || m[2]);
+            let o = tryParseJson(
+                m[1] || m[2]
+            );
 
-            if (o)
-                return findVideoObject(o, 0) || o;
+            if (o) {
+                return findMetadataInObject(
+                    o,
+                    0
+                ) || o;
+            }
         }
     }
 
     return {};
 }
 
-
-/* ============================================================
- * MEDIA EXTRACTION
- * ========================================================== */
-
-function unique(arr, url, base) {
-    url = normalizeUrl(url, base);
-
-    if (!httpUrl(url)) return;
-    if (arr.indexOf(url) >= 0) return;
-
-    if (arr.length < MAX_SOURCES)
-        arr.push(url);
-}
-
-function scanUrls(text, hls, mp4, base) {
-    text = str(text);
-    if (!text) return;
-
-    let normalized = cleanUrl(text);
-
-    let absolute =
-        /https?:\/\/[^\s"'<>\\]+/gi;
-
-    let m;
-
-    while ((m = absolute.exec(normalized)) !== null) {
-        let u = cleanUrl(m[0]);
-
-        if (hlsUrl(u))
-            unique(hls, u, base);
-        else if (mediaUrl(u))
-            unique(mp4, u, base);
-    }
-
-    let protocolRelative =
-        /\/\/[^\s"'<>\\]+/g;
-
-    while ((m = protocolRelative.exec(normalized)) !== null) {
-        let u2 = "https:" + cleanUrl(m[0]);
-
-        if (hlsUrl(u2))
-            unique(hls, u2, base);
-        else if (mediaUrl(u2))
-            unique(mp4, u2, base);
-    }
-
-    if (hlsUrl(normalized))
-        unique(hls, normalized, base);
-
-    if (mediaUrl(normalized))
-        unique(mp4, normalized, base);
-}
-
-function collectHtmlMedia(html, base) {
-    let r = {
+function collectMediaFromHtml(html, baseUrl) {
+    let result = {
         hls: [],
         mp4: []
     };
 
-    scanUrls(html, r.hls, r.mp4, base);
+    scanStringForUrls(
+        html,
+        result.hls,
+        result.mp4,
+        baseUrl
+    );
 
-    let normalized = decodeHtml(html)
+    /*
+     * Also catch escaped/encoded URLs whose extension is split by markup.
+     */
+
+    let normalized = htmlDecode(
+        safeStr(html)
+    )
         .replace(/\\\//g, "/")
         .replace(/\\u002f/gi, "/")
         .replace(/\\u003a/gi, ":")
         .replace(/\\u003d/gi, "=");
 
-    scanUrls(normalized, r.hls, r.mp4, base);
+    scanStringForUrls(
+        normalized,
+        result.hls,
+        result.mp4,
+        baseUrl
+    );
 
-    return r;
+    return result;
 }
 
-function collectObjectMedia(root, base) {
-    let r = {
-        hls: [],
-        mp4: []
-    };
+function fetchMetadataUrl(meta, baseUrl) {
+    if (!safeObj(meta)) {
+        return null;
+    }
 
-    function walk(v, depth) {
-        if (depth > MAX_DEPTH)
-            return;
+    let keys = [
+        "metadataUrl",
+        "metadata_url",
+        "metaUrl",
+        "metadataURL",
+        "playerMetadataUrl",
+        "videoMetadataUrl"
+    ];
 
-        if (
-            r.hls.length + r.mp4.length >=
-            MAX_SOURCES
-        )
-            return;
+    let urls = [];
 
-        if (typeof v === "string") {
-            scanUrls(v, r.hls, r.mp4, base);
-
-            let p = parseJson(v);
-            if (p)
-                walk(p, depth + 1);
-
-            return;
-        }
-
-        if (!obj(v))
-            return;
-
-        if (Array.isArray(v)) {
-            for (let i = 0; i < v.length; i++)
-                walk(v[i], depth + 1);
-
-            return;
-        }
-
+    for (let i = 0; i < keys.length; i++) {
         try {
-            for (let k in v) {
-                let value = v[k];
-                let key = str(k).toLowerCase();
-
-                if (typeof value === "string") {
-                    if (
-                        /hls|m3u8|playlist|manifest|stream|source|video|media|file|url|play_url|media_url/.test(key) ||
-                        hlsUrl(value) ||
-                        mediaUrl(value)
-                    ) {
-                        scanUrls(
-                            value,
-                            r.hls,
-                            r.mp4,
-                            base
-                        );
-                    }
-                } else if (obj(value)) {
-                    walk(value, depth + 1);
-                }
-
-                if (
-                    r.hls.length + r.mp4.length >=
-                    MAX_SOURCES
-                )
-                    break;
+            if (meta[keys[i]]) {
+                urls.push(
+                    normalizeUrl(
+                        meta[keys[i]],
+                        baseUrl
+                    )
+                );
             }
         } catch (_) {}
     }
 
-    walk(root, 0);
+    for (let i = 0; i < urls.length; i++) {
+        if (!isHttpUrl(urls[i])) {
+            continue;
+        }
 
-    return r;
+        let body = httpGetAuth(urls[i]);
+
+        if (!body) {
+            body = httpGet(urls[i]);
+        }
+
+        let o = tryParseJson(body);
+
+        if (o) {
+            return findMetadataInObject(
+                o,
+                0
+            ) || o;
+        }
+    }
+
+    return null;
 }
 
+function parseMetadata(html, pageUrl) {
+    let meta = extractMetadataFromHtml(html);
 
-/* ============================================================
- * METADATA HELPERS
- * ========================================================== */
+    if (!meta) {
+        return null;
+    }
 
-function first(root, keys) {
-    if (!obj(root)) return "";
+    let remote = fetchMetadataUrl(
+        meta,
+        pageUrl
+    );
+
+    return remote || meta;
+}
+
+function pushUnique(arr, url, base) {
+    url = normalizeUrl(
+        url,
+        base
+    );
+
+    if (!isHttpUrl(url)) {
+        return;
+    }
+
+    if (arr.indexOf(url) >= 0) {
+        return;
+    }
+
+    if (arr.length >= MAX_SOURCES) {
+        return;
+    }
+
+    arr.push(url);
+}
+
+function scanStringForUrls(
+    s,
+    hls,
+    mp4,
+    base
+) {
+    s = safeStr(s);
+
+    if (!s) {
+        return;
+    }
+
+    let d = cleanUrl(s);
+
+    let abs =
+        /https?:\/\/[^\s"'<>\\]+/gi;
+
+    let m;
+
+    while (
+        (m = abs.exec(d)) !== null
+    ) {
+        let u = cleanUrl(m[0]);
+
+        if (isHlsUrl(u)) {
+            pushUnique(
+                hls,
+                u,
+                base
+            );
+        } else if (isMp4Url(u)) {
+            pushUnique(
+                mp4,
+                u,
+                base
+            );
+        }
+    }
+
+    let proto =
+        /\/\/[^\s"'<>\\]+/g;
+
+    while (
+        (m = proto.exec(d)) !== null
+    ) {
+        let u2 =
+            "https:" +
+            cleanUrl(m[0]);
+
+        if (isHlsUrl(u2)) {
+            pushUnique(
+                hls,
+                u2,
+                base
+            );
+        } else if (isMp4Url(u2)) {
+            pushUnique(
+                mp4,
+                u2,
+                base
+            );
+        }
+    }
+
+    if (isHlsUrl(d)) {
+        pushUnique(
+            hls,
+            d,
+            base
+        );
+    }
+
+    if (isMp4Url(d)) {
+        pushUnique(
+            mp4,
+            d,
+            base
+        );
+    }
+}
+
+function collectMedia(meta, baseUrl) {
+    let result = {
+        hls: [],
+        mp4: []
+    };
+
+    function walk(obj, depth) {
+        if (
+            depth > MAX_JSON_DEPTH ||
+            result.hls.length +
+            result.mp4.length >= MAX_SOURCES
+        ) {
+            return;
+        }
+
+        if (typeof obj === "string") {
+            scanStringForUrls(
+                obj,
+                result.hls,
+                result.mp4,
+                baseUrl
+            );
+
+            let parsed = tryParseJson(obj);
+
+            if (parsed) {
+                walk(
+                    parsed,
+                    depth + 1
+                );
+            }
+
+            return;
+        }
+
+        if (!safeObj(obj)) {
+            return;
+        }
+
+        if (Array.isArray(obj)) {
+            for (
+                let i = 0;
+                i < obj.length;
+                i++
+            ) {
+                walk(
+                    obj[i],
+                    depth + 1
+                );
+            }
+
+            return;
+        }
+
+        try {
+            for (let k in obj) {
+                let v = obj[k];
+
+                let key =
+                    safeStr(k).toLowerCase();
+
+                if (typeof v === "string") {
+                    if (
+                        /hls|m3u8|playlist|manifest|stream|source|video|media|file|url|play_url|media_url/
+                            .test(key)
+                    ) {
+                        scanStringForUrls(
+                            v,
+                            result.hls,
+                            result.mp4,
+                            baseUrl
+                        );
+                    } else if (
+                        isHlsUrl(v) ||
+                        isMp4Url(v)
+                    ) {
+                        scanStringForUrls(
+                            v,
+                            result.hls,
+                            result.mp4,
+                            baseUrl
+                        );
+                    }
+                } else if (safeObj(v)) {
+                    walk(
+                        v,
+                        depth + 1
+                    );
+                }
+
+                if (
+                    result.hls.length +
+                    result.mp4.length >=
+                    MAX_SOURCES
+                ) {
+                    break;
+                }
+            }
+        } catch (_) {}
+    }
+
+    walk(meta, 0);
+
+    return result;
+}
+
+function firstValue(obj, keys) {
+    if (!safeObj(obj)) {
+        return "";
+    }
 
     for (let i = 0; i < keys.length; i++) {
         try {
-            let v = root[keys[i]];
+            let v = obj[keys[i]];
 
-            if (v !== undefined && v !== null) {
-                let s = str(v);
-                if (s) return s;
+            if (
+                v !== undefined &&
+                v !== null
+            ) {
+                let s = safeStr(v);
+
+                if (s) {
+                    return s;
+                }
             }
         } catch (_) {}
     }
@@ -637,22 +908,42 @@ function first(root, keys) {
     return "";
 }
 
-function recursive(root, keys, depth) {
-    if (!obj(root) || depth > MAX_DEPTH)
+function recursiveValue(
+    root,
+    keys,
+    depth
+) {
+    if (
+        !safeObj(root) ||
+        depth > MAX_JSON_DEPTH
+    ) {
         return "";
+    }
 
-    let direct = first(root, keys);
-    if (direct) return direct;
+    let direct = firstValue(
+        root,
+        keys
+    );
+
+    if (direct) {
+        return direct;
+    }
 
     if (Array.isArray(root)) {
-        for (let i = 0; i < root.length; i++) {
-            let r = recursive(
+        for (
+            let i = 0;
+            i < root.length;
+            i++
+        ) {
+            let v = recursiveValue(
                 root[i],
                 keys,
                 depth + 1
             );
 
-            if (r) return r;
+            if (v) {
+                return v;
+            }
         }
 
         return "";
@@ -660,14 +951,19 @@ function recursive(root, keys, depth) {
 
     try {
         for (let k in root) {
-            if (obj(root[k])) {
-                let r2 = recursive(
-                    root[k],
-                    keys,
-                    depth + 1
-                );
+            let v = root[k];
 
-                if (r2) return r2;
+            if (safeObj(v)) {
+                let found =
+                    recursiveValue(
+                        v,
+                        keys,
+                        depth + 1
+                    );
+
+                if (found) {
+                    return found;
+                }
             }
         }
     } catch (_) {}
@@ -675,32 +971,47 @@ function recursive(root, keys, depth) {
     return "";
 }
 
-function title(meta, fallback) {
+function getTitle(
+    meta,
+    fallback
+) {
     return cleanText(
-        first(meta, [
-            "title",
-            "name",
-            "movieTitle",
-            "videoTitle",
-            "caption",
-            "contentTitle"
-        ])
-    ) || fallback;
+        firstValue(
+            meta,
+            [
+                "title",
+                "name",
+                "movieTitle",
+                "videoTitle",
+                "caption",
+                "contentTitle"
+            ]
+        )
+    ) ||
+    cleanText(fallback) ||
+    "OK.ru video";
 }
 
-function description(meta) {
+function getDescription(meta) {
     return cleanText(
-        recursive(
+        firstValue(
             meta,
-            ["description", "desc", "summary", "text"],
-            0
+            [
+                "description",
+                "desc",
+                "text",
+                "summary"
+            ]
         )
     );
 }
 
-function poster(meta, base) {
+function getPoster(
+    meta,
+    baseUrl
+) {
     return normalizeUrl(
-        recursive(
+        firstValue(
             meta,
             [
                 "poster",
@@ -713,15 +1024,14 @@ function poster(meta, base) {
                 "imageUrl",
                 "preview",
                 "previewUrl"
-            ],
-            0
+            ]
         ),
-        base
+        baseUrl
     );
 }
 
-function duration(meta) {
-    let v = recursive(
+function getDuration(meta) {
+    let v = firstValue(
         meta,
         [
             "duration",
@@ -730,80 +1040,778 @@ function duration(meta) {
             "length",
             "videoDuration",
             "mediaDuration"
-        ],
-        0
+        ]
     );
 
     let n = parseFloat(v);
 
-    if (!isFinite(n) || n <= 0)
+    if (
+        !isFinite(n) ||
+        n <= 0
+    ) {
         return 0;
+    }
 
-    if (n > 1000)
-        n /= 1000;
+    if (n > 1000) {
+        n = n / 1000;
+    }
 
     return Math.round(n);
 }
 
-function authorName(meta) {
+function getAuthorName(meta) {
     return cleanText(
-        recursive(
+        firstValue(
             meta,
             [
                 "authorName",
+                "author",
                 "ownerName",
                 "uploader",
                 "userName",
                 "username",
-                "owner",
-                "author"
-            ],
-            0
+                "owner"
+            ]
         )
     );
 }
 
+/* -------------------- External embeds -------------------- */
 
-/* ============================================================
- * CAMPOS ENCONTRADOS EN XUPERTV
- * ========================================================== */
+function extractYouTubeIdFromString(value) {
+    let s = cleanUrl(value)
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/gi, "&");
 
-function playParams(meta) {
-    return recursive(
+    let patterns = [
+        /(?:youtube(?:-nocookie)?\.com\/embed\/)([A-Za-z0-9_-]{6,20})/i,
+
+        /(?:youtube(?:-nocookie)?\.com\/watch\?(?:[^#\s"']*?&)?v=)([A-Za-z0-9_-]{6,20})/i,
+
+        /(?:youtu\.be\/)([A-Za-z0-9_-]{6,20})/i,
+
+        /(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{6,20})/i,
+
+        /(?:youtube\.com\/live\/)([A-Za-z0-9_-]{6,20})/i
+    ];
+
+    for (
+        let i = 0;
+        i < patterns.length;
+        i++
+    ) {
+        let m = s.match(
+            patterns[i]
+        );
+
+        if (m) {
+            return m[1];
+        }
+    }
+
+    return "";
+}
+
+function findYouTubeEmbed(html) {
+    let s = safeStr(html)
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/gi, "&");
+
+    let patterns = [
+        /<iframe[^>]+(?:src|data-src)\s*=\s*["']([^"']+)["'][^>]*>/gi,
+
+        /(?:youtube(?:-nocookie)?\.com|youtu\.be)[^\s"'<>]+/gi,
+
+        /(?:playerResponse|videoData|externalVideo|embedUrl)[^\n]{0,1000}/gi
+    ];
+
+    for (
+        let p = 0;
+        p < patterns.length;
+        p++
+    ) {
+        let re = patterns[p];
+        let m;
+
+        while (
+            (m = re.exec(s)) !== null
+        ) {
+            let candidate =
+                m[1] ||
+                m[0] ||
+                "";
+
+            let id =
+                extractYouTubeIdFromString(
+                    candidate
+                );
+
+            if (id) {
+                return {
+                    id: id,
+                    url:
+                        "https://www.youtube.com/watch?v=" +
+                        id,
+                    embedUrl:
+                        "https://www.youtube.com/embed/" +
+                        id
+                };
+            }
+        }
+    }
+
+    return null;
+}
+
+function makeEmptyDescriptor() {
+    try {
+        return new MuxVideoSourceDescriptor({
+            isUnMuxed: false,
+            videoSources: []
+        });
+    } catch (_) {}
+
+    try {
+        return new VideoSourceDescriptor([]);
+    } catch (_) {}
+
+    return null;
+}
+
+/* -------------------- Comment extraction -------------------- */
+
+function parseCommentDate(value) {
+    if (
+        value === null ||
+        value === undefined ||
+        value === ""
+    ) {
+        return 0;
+    }
+
+    let s = safeStr(value).trim();
+
+    let n = Number(s);
+
+    if (
+        isFinite(n) &&
+        n > 0
+    ) {
+        if (n > 100000000000) {
+            n = n / 1000;
+        }
+
+        return Math.round(n);
+    }
+
+    let t = Date.parse(s);
+
+    return isNaN(t)
+        ? 0
+        : Math.round(t / 1000);
+}
+
+function findCommentMessage(obj) {
+    return cleanText(
+        firstValue(
+            obj,
+            [
+                "message",
+                "text",
+                "body",
+                "content",
+                "commentText",
+                "comment_text",
+                "msg",
+                "textHtml",
+                "text_html"
+            ]
+        )
+    );
+}
+
+function findCommentAuthor(obj) {
+    if (!safeObj(obj)) {
+        return {
+            name: "",
+            id: "0",
+            url: "",
+            thumbnail: ""
+        };
+    }
+
+    let author =
+        obj.author ||
+        obj.user ||
+        obj.profile ||
+        obj.owner ||
+        obj.userInfo ||
+        obj.authorInfo;
+
+    if (!safeObj(author)) {
+        author = obj;
+    }
+
+    return {
+        name: cleanText(
+            firstValue(
+                author,
+                [
+                    "name",
+                    "displayName",
+                    "fullName",
+                    "userName",
+                    "username",
+                    "nickName"
+                ]
+            )
+        ),
+
+        id: safeStr(
+            firstValue(
+                author,
+                [
+                    "id",
+                    "userId",
+                    "uid",
+                    "user_id",
+                    "profileId"
+                ]
+            )
+        ),
+
+        url: normalizeUrl(
+            firstValue(
+                author,
+                [
+                    "url",
+                    "profileUrl",
+                    "link"
+                ]
+            ),
+            "https://ok.ru/"
+        ),
+
+        thumbnail: normalizeUrl(
+            firstValue(
+                author,
+                [
+                    "avatar",
+                    "avatarUrl",
+                    "photo",
+                    "photoUrl",
+                    "thumbnail"
+                ]
+            ),
+            "https://ok.ru/"
+        )
+    };
+}
+
+function isCommentObject(obj) {
+    if (
+        !safeObj(obj) ||
+        Array.isArray(obj)
+    ) {
+        return false;
+    }
+
+    let msg =
+        findCommentMessage(obj);
+
+    if (!msg) {
+        return false;
+    }
+
+    let hasCommentKey = false;
+
+    try {
+        for (let k in obj) {
+            if (
+                /comment|message|reply/i.test(k)
+            ) {
+                hasCommentKey = true;
+                break;
+            }
+        }
+    } catch (_) {}
+
+    return (
+        hasCommentKey ||
+        !!obj.author ||
+        !!obj.user ||
+        !!obj.commentId ||
+        !!obj.comment_id
+    );
+}
+
+function collectCommentObjects(
+    root,
+    out,
+    depth
+) {
+    if (
+        !safeObj(root) ||
+        depth > MAX_JSON_DEPTH ||
+        out.length >= 200
+    ) {
+        return;
+    }
+
+    if (Array.isArray(root)) {
+        for (
+            let i = 0;
+            i < root.length &&
+            out.length < 200;
+            i++
+        ) {
+            collectCommentObjects(
+                root[i],
+                out,
+                depth + 1
+            );
+        }
+
+        return;
+    }
+
+    if (isCommentObject(root)) {
+        out.push(root);
+    }
+
+    try {
+        for (let k in root) {
+            let v = root[k];
+
+            if (safeObj(v)) {
+                collectCommentObjects(
+                    v,
+                    out,
+                    depth + 1
+                );
+            } else if (
+                typeof v === "string" &&
+                v.length > 20
+            ) {
+                let parsed =
+                    tryParseJson(v);
+
+                if (parsed) {
+                    collectCommentObjects(
+                        parsed,
+                        out,
+                        depth + 1
+                    );
+                }
+            }
+
+            if (out.length >= 200) {
+                break;
+            }
+        }
+    } catch (_) {}
+}
+
+function extractCommentsFromHtml(
+    html,
+    videoUrl
+) {
+    let objects = [];
+
+    let jsons =
+        extractJsonObjectsFromHtml(
+            html
+        );
+
+    for (
+        let i = 0;
+        i < jsons.length;
+        i++
+    ) {
+        collectCommentObjects(
+            jsons[i],
+            objects,
+            0
+        );
+    }
+
+    /*
+     * Also inspect data-* attributes commonly used by OK's comment widgets.
+     */
+
+    let attrRe =
+        /(?:data-comment|data-comment-data|data-comments|data-options|data-json)\s*=\s*["']([\s\S]*?)["']/gi;
+
+    let am;
+
+    while (
+        (am = attrRe.exec(html)) !== null &&
+        objects.length < 200
+    ) {
+        let parsed =
+            tryParseJson(am[1]);
+
+        if (parsed) {
+            collectCommentObjects(
+                parsed,
+                objects,
+                0
+            );
+        }
+    }
+
+    /*
+     * Server-rendered comment DOM fallback.
+     */
+
+    try {
+        let doc =
+            new DOMParser()
+                .parseFromString(
+                    html,
+                    "text/html"
+                );
+
+        let nodes =
+            doc.querySelectorAll(
+                "[data-comment-id], .comment, .comments-item, .comments__item, .ucard-comment, [class*='comment']"
+            );
+
+        for (
+            let i = 0;
+            i < nodes.length &&
+            objects.length < 200;
+            i++
+        ) {
+            let node = nodes[i];
+
+            let text =
+                cleanText(
+                    node.textContent ||
+                    node.innerText ||
+                    ""
+                );
+
+            if (
+                !text ||
+                text.length > 4000
+            ) {
+                continue;
+            }
+
+            let id = "";
+
+            try {
+                id =
+                    node.getAttribute(
+                        "data-comment-id"
+                    ) ||
+                    node.getAttribute(
+                        "data-id"
+                    ) ||
+                    "";
+            } catch (_) {}
+
+            objects.push({
+                commentId: id,
+                message: text
+            });
+        }
+    } catch (e) {
+        addDebug(
+            "comment DOM=" + e
+        );
+    }
+
+    let out = [];
+    let seen = {};
+
+    for (
+        let i = 0;
+        i < objects.length;
+        i++
+    ) {
+        let o = objects[i];
+
+        let message =
+            findCommentMessage(o);
+
+        if (!message) {
+            continue;
+        }
+
+        let a =
+            findCommentAuthor(o);
+
+        let cid =
+            safeStr(
+                firstValue(
+                    o,
+                    [
+                        "commentId",
+                        "comment_id",
+                        "id"
+                    ]
+                )
+            ) ||
+            ("c" + i);
+
+        let key =
+            cid +
+            "|" +
+            message.substring(0, 120);
+
+        if (seen[key]) {
+            continue;
+        }
+
+        seen[key] = true;
+
+        let author = null;
+
+        try {
+            author =
+                new PlatformAuthorLink(
+                    new PlatformID(
+                        PLATFORM_NAME,
+                        a.id || "0",
+                        PLUGIN_ID
+                    ),
+                    a.name ||
+                        "OK.ru user",
+                    a.url ||
+                        "https://ok.ru/",
+                    a.thumbnail || "",
+                    0
+                );
+        } catch (_) {}
+
+        let replies =
+            Number(
+                firstValue(
+                    o,
+                    [
+                        "replyCount",
+                        "repliesCount",
+                        "reply_count",
+                        "replies"
+                    ]
+                )
+            );
+
+        if (
+            !isFinite(replies) ||
+            replies < 0
+        ) {
+            replies = 0;
+        }
+
+        let context = {
+            videoUrl: videoUrl,
+            commentId: cid,
+            raw: o
+        };
+
+        try {
+            out.push(
+                new Comment({
+                    contextUrl: videoUrl,
+                    author: author,
+                    message: message,
+                    rating:
+                        new RatingLikes(0),
+                    date:
+                        parseCommentDate(
+                            firstValue(
+                                o,
+                                [
+                                    "date",
+                                    "timestamp",
+                                    "createdAt",
+                                    "created_at",
+                                    "time"
+                                ]
+                            )
+                        ),
+                    replyCount:
+                        Math.round(
+                            replies
+                        ),
+                    context: context
+                })
+            );
+        } catch (_) {}
+    }
+
+    return out;
+}
+
+function makeCommentPager(
+    results,
+    hasMore,
+    context
+) {
+    try {
+        return new CommentPager(
+            results,
+            hasMore,
+            context
+        );
+    } catch (_) {
+        return {
+            results: results,
+            hasMore: hasMore,
+            context: context
+        };
+    }
+}
+
+function getCommentsOk(
+    url,
+    continuationToken
+) {
+    let id =
+        extractVideoId(url);
+
+    if (!id) {
+        return makeCommentPager(
+            [],
+            false,
+            {
+                url: url,
+                offset: 0
+            }
+        );
+    }
+
+    let canonical =
+        "https://ok.ru/video/" +
+        id;
+
+    let html =
+        loadOkPage(canonical);
+
+    if (!html) {
+        return makeCommentPager(
+            [],
+            false,
+            {
+                url: url,
+                offset: 0
+            }
+        );
+    }
+
+    let all =
+        extractCommentsFromHtml(
+            html,
+            canonical
+        );
+
+    let offset = 0;
+
+    try {
+        if (
+            continuationToken &&
+            typeof continuationToken ===
+                "object"
+        ) {
+            offset =
+                Number(
+                    continuationToken.offset
+                ) || 0;
+        } else if (
+            continuationToken
+        ) {
+            offset =
+                Number(
+                    continuationToken
+                ) || 0;
+        }
+    } catch (_) {}
+
+    let pageSize = 20;
+
+    let page =
+        all.slice(
+            offset,
+            offset + pageSize
+        );
+
+    let next =
+        offset + page.length;
+
+    let hasMore =
+        next < all.length;
+
+    return makeCommentPager(
+        page,
+        hasMore,
+        {
+            url: url,
+            offset: next
+        }
+    );
+}
+
+/* -------------------- Xuper APK findings -------------------- */
+
+function xuperGetPlayParams(meta) {
+    return recursiveValue(
         meta,
-        ["play_params", "playParams"],
+        [
+            "play_params",
+            "playParams"
+        ],
         0
     );
 }
 
-function verificationToken(meta) {
-    return recursive(
+function xuperGetVerificationToken(
+    meta
+) {
+    return recursiveValue(
         meta,
-        ["verificationToken", "verification_token"],
+        [
+            "verificationToken",
+            "verification_token"
+        ],
         0
     );
 }
 
-function playlist(meta) {
-    return recursive(
+function xuperGetPlaylistUrl(meta) {
+    return recursiveValue(
         meta,
-        ["playlistUrl", "playlist_url"],
+        [
+            "playlistUrl",
+            "playlist_url"
+        ],
         0
     );
 }
 
-function signdata(meta) {
-    return recursive(
+function xuperGetSigndata(meta) {
+    return recursiveValue(
         meta,
-        ["signdata", "signature", "sign"],
+        [
+            "signdata",
+            "signature",
+            "sign"
+        ],
         0
     );
 }
 
-function directPlaylist(meta, base) {
+function xuperDirectPlaylist(
+    meta,
+    baseUrl
+) {
     let candidates = [
-        playlist(meta),
-        recursive(
+        xuperGetPlaylistUrl(meta),
+
+        recursiveValue(
             meta,
             [
                 "play_url",
@@ -817,26 +1825,41 @@ function directPlaylist(meta, base) {
         )
     ];
 
-    for (let i = 0; i < candidates.length; i++) {
-        let u = normalizeUrl(candidates[i], base);
+    for (
+        let i = 0;
+        i < candidates.length;
+        i++
+    ) {
+        let u =
+            normalizeUrl(
+                candidates[i],
+                baseUrl
+            );
 
-        if (hlsUrl(u))
+        if (isHlsUrl(u)) {
             return u;
+        }
     }
 
     return "";
 }
 
+/*
+ * No se implementa un firmador Xuper inventado.
+ * Si el sitio entrega playlistUrl, se usa. Si no, se utiliza el flujo normal
+ * de OK.ru. Esto evita fabricar tokens que produzcan URLs invalidas y evita
+ * enviar a Cast una URL de pagina intermedia.
+ */
 
-/* ============================================================
- * GRAYJAY SOURCES
- * ========================================================== */
-
-function makeHls(url, dur) {
+function makeHlsSource(
+    url,
+    duration
+) {
     try {
         return new HLSSource({
             name: "OK.ru HLS",
-            duration: dur || 0,
+            duration:
+                duration || 0,
             url: url
         });
     } catch (_) {
@@ -844,24 +1867,38 @@ function makeHls(url, dur) {
     }
 }
 
-function makeMp4(url, dur, index) {
+function makeMp4Source(
+    url,
+    duration,
+    index
+) {
     try {
-        let container =
-            /\.m4v(?:$|[?#])/i.test(url)
-                ? "m4v"
-                : /\.webm(?:$|[?#])/i.test(url)
-                    ? "webm"
-                    : "mp4";
-
         return new VideoUrlSource({
             width: 0,
             height: 0,
-            container: container,
+
+            container:
+                /\.m4v(?:$|[?#])/i.test(
+                    url
+                )
+                    ? "m4v"
+                    : /\.webm(?:$|[?#])/i.test(
+                        url
+                    )
+                        ? "webm"
+                        : "mp4",
+
             codec: "",
-            name: "OK.ru " + container.toUpperCase() +
-                " " + (index + 1),
+
+            name:
+                "OK.ru MP4 " +
+                (index + 1),
+
             bitrate: 0,
-            duration: dur || 0,
+
+            duration:
+                duration || 0,
+
             url: url
         });
     } catch (_) {
@@ -869,7 +1906,9 @@ function makeMp4(url, dur, index) {
     }
 }
 
-function descriptor(sources) {
+function makeDescriptor(
+    sources
+) {
     try {
         return new MuxVideoSourceDescriptor({
             isUnMuxed: false,
@@ -877,28 +1916,47 @@ function descriptor(sources) {
         });
     } catch (_) {}
 
+    /*
+     * Compatibilidad con algunas versiones antiguas del runtime.
+     */
+
     try {
-        return new VideoSourceDescriptor(sources);
+        return new VideoSourceDescriptor(
+            sources
+        );
     } catch (_) {}
 
     return null;
 }
 
-function thumbnails(url) {
+function makeThumbnailList(
+    poster
+) {
     let out = [];
 
-    if (!httpUrl(url))
+    if (!isHttpUrl(poster)) {
         return out;
+    }
 
     try {
-        out.push(new Thumbnail(url, 0));
+        out.push(
+            new Thumbnail(
+                poster,
+                0
+            )
+        );
     } catch (_) {}
 
     return out;
 }
 
-function makeAuthor(name, id) {
-    if (!name) return null;
+function makeAuthor(
+    name,
+    id
+) {
+    if (!name) {
+        return null;
+    }
 
     try {
         return new PlatformAuthorLink(
@@ -917,241 +1975,328 @@ function makeAuthor(name, id) {
     return null;
 }
 
+function buildDetails(
+    meta,
+    pageUrl,
+    videoId
+) {
+    let title =
+        getTitle(
+            meta,
+            "OK.ru video " +
+            videoId
+        );
 
-/* ============================================================
- * MEDIA SCORING
- * ========================================================== */
+    let description =
+        getDescription(meta);
 
-function mediaScore(url) {
-    let s = str(url).toLowerCase();
-    let score = 0;
+    let poster =
+        getPoster(
+            meta,
+            pageUrl
+        );
 
-    if (s.indexOf("master") >= 0)
-        score += 10000;
+    let duration =
+        getDuration(meta);
 
-    if (s.indexOf("playlist") >= 0)
-        score += 3000;
-
-    if (s.indexOf("m3u8") >= 0)
-        score += 2000;
-
-    let m = s.match(
-        /(?:^|[^0-9])(2160|1440|1080|900|720|576|540|480|360|240)(?:p)?(?:[^0-9]|$)/
-    );
-
-    if (m)
-        score += parseInt(m[1], 10);
-
-    return score;
-}
-
-
-/* ============================================================
- * DETAILS
- * ========================================================== */
-
-function buildDetails(meta, pageUrl, id, pageMedia) {
-    let t = title(
-        meta,
-        "OK.ru video " + id
-    );
-
-    let d = description(meta);
-    let p = poster(meta, pageUrl);
-    let dur = duration(meta);
-    let author = authorName(meta);
-
-    let objectMedia =
-        collectObjectMedia(meta, pageUrl);
+    let authorName =
+        getAuthorName(meta);
 
     let media = {
         hls: [],
         mp4: []
     };
 
-    for (let i = 0; i < objectMedia.hls.length; i++)
-        unique(media.hls, objectMedia.hls[i], pageUrl);
+    if (
+        Array.isArray(
+            meta.__ok_hls
+        )
+    ) {
+        media.hls =
+            meta.__ok_hls.slice(0);
+    }
 
-    for (let i = 0; i < pageMedia.hls.length; i++)
-        unique(media.hls, pageMedia.hls[i], pageUrl);
+    if (
+        Array.isArray(
+            meta.__ok_mp4
+        )
+    ) {
+        media.mp4 =
+            meta.__ok_mp4.slice(0);
+    }
 
-    for (let i = 0; i < objectMedia.mp4.length; i++)
-        unique(media.mp4, objectMedia.mp4[i], pageUrl);
+    if (
+        media.hls.length === 0 &&
+        media.mp4.length === 0
+    ) {
+        media =
+            collectMedia(
+                meta,
+                pageUrl
+            );
+    }
 
-    for (let i = 0; i < pageMedia.mp4.length; i++)
-        unique(media.mp4, pageMedia.mp4[i], pageUrl);
+    let xuper =
+        xuperDirectPlaylist(
+            meta,
+            pageUrl
+        );
 
-    let xp = directPlaylist(meta, pageUrl);
+    if (
+        xuper &&
+        media.hls.indexOf(xuper) < 0
+    ) {
+        media.hls.unshift(xuper);
+    }
 
-    if (xp)
-        unique(media.hls, xp, pageUrl);
-
-    media.hls.sort(function(a, b) {
-        return mediaScore(b) - mediaScore(a);
-    });
-
-    media.mp4.sort(function(a, b) {
-        return mediaScore(b) - mediaScore(a);
-    });
-
-    debug(
-        "HLS=" + media.hls.length +
-        " MP4=" + media.mp4.length
+    addDebug(
+        "media hls=" +
+        media.hls.length +
+        " mp4=" +
+        media.mp4.length
     );
 
-    debug(
-        "Xuper fields: play_params=" +
-        (playParams(meta) ? "yes" : "no") +
+    addDebug(
+        "xuper play_params=" +
+        (
+            xuperGetPlayParams(meta)
+                ? "yes"
+                : "no"
+        ) +
         " verificationToken=" +
-        (verificationToken(meta) ? "yes" : "no") +
+        (
+            xuperGetVerificationToken(
+                meta
+            )
+                ? "yes"
+                : "no"
+        ) +
         " playlistUrl=" +
-        (playlist(meta) ? "yes" : "no") +
+        (
+            xuperGetPlaylistUrl(meta)
+                ? "yes"
+                : "no"
+        ) +
         " signdata=" +
-        (signdata(meta) ? "yes" : "no")
+        (
+            xuperGetSigndata(meta)
+                ? "yes"
+                : "no"
+        )
     );
 
     let sources = [];
 
     /*
-     * HLS PRIMERO.
+     * 1) HLS: primero y sin RequestModifier.
      *
-     * No usamos RequestModifier aquí.
-     * La fuente entregada a GrayJay/Cast es la URL directa.
+     * La URL directa es mucho mas compatible con FCast/Chromecast que una
+     * fuente que dependa de headers del plugin que el receptor puede no
+     * conocer.
      */
+
     for (
         let i = 0;
         i < media.hls.length &&
         sources.length < MAX_SOURCES;
         i++
     ) {
-        let s = makeHls(
-            media.hls[i],
-            dur
-        );
+        let hls =
+            makeHlsSource(
+                media.hls[i],
+                duration
+            );
 
-        if (s)
-            sources.push(s);
+        if (hls) {
+            sources.push(hls);
+        }
     }
 
     /*
-     * MP4 REAL COMO FALLBACK.
+     * 2) MP4: se conserva como fallback real incluso cuando existe HLS.
      *
-     * Se mantiene aunque exista HLS.
+     * Esto permite que SourceAuto tenga una alternativa si el receptor/player
+     * no acepta una variante HLS concreta.
      */
+
     for (
         let j = 0;
         j < media.mp4.length &&
         sources.length < MAX_SOURCES;
         j++
     ) {
-        let s2 = makeMp4(
-            media.mp4[j],
-            dur,
-            j
-        );
+        let mp4 =
+            makeMp4Source(
+                media.mp4[j],
+                duration,
+                j
+            );
 
-        if (s2)
-            sources.push(s2);
+        if (mp4) {
+            sources.push(mp4);
+        }
     }
 
     if (sources.length === 0) {
         throw new Error(
             "No playable direct HLS/MP4 source found\n" +
-            debugDump()
+            debugText()
         );
     }
 
-    let desc = descriptor(sources);
+    let thumbs =
+        makeThumbnailList(
+            poster
+        );
 
-    if (!desc)
+    let author =
+        makeAuthor(
+            authorName,
+            videoId
+        );
+
+    let descriptor =
+        makeDescriptor(
+            sources
+        );
+
+    if (!descriptor) {
         throw new Error(
             "GrayJay VideoSourceDescriptor unavailable"
         );
+    }
 
-    let firstHls =
-        media.hls.length
-            ? makeHls(media.hls[0], dur)
-            : null;
+    let firstHls = null;
 
-    let data = {
-        id: new PlatformID(
-            PLATFORM_NAME,
-            id,
-            PLUGIN_ID
-        ),
+    if (media.hls.length > 0) {
+        firstHls =
+            makeHlsSource(
+                media.hls[0],
+                duration
+            );
+    }
 
-        name: t,
+    let obj = {
+        id:
+            new PlatformID(
+                PLATFORM_NAME,
+                videoId,
+                PLUGIN_ID
+            ),
 
-        thumbnails: new Thumbnails(
-            thumbnails(p)
-        ),
+        name: title,
 
-        author: makeAuthor(
-            author,
-            id
-        ),
+        thumbnails:
+            new Thumbnails(
+                thumbs
+            ),
+
+        author: author,
 
         uploadDate: 0,
 
         url: pageUrl,
 
-        duration: dur,
+        duration: duration,
 
         viewCount: 0,
 
         isLive: false,
 
-        description: d,
+        description:
+            description,
 
-        video: desc,
+        video:
+            descriptor,
 
         dash: null,
 
-        hls: firstHls,
+        hls:
+            firstHls,
 
         live: []
     };
 
     try {
-        return new PlatformVideoDetails(data);
-    } catch (_) {
-        delete data.dash;
-        delete data.hls;
+        return new PlatformVideoDetails(
+            obj
+        );
+    } catch (e) {
+        /*
+         * Fallback minimo para runtimes que no aceptan campos opcionales null.
+         */
 
-        return new PlatformVideoDetails(data);
+        let minimal = {
+            id: obj.id,
+            name: obj.name,
+            thumbnails: obj.thumbnails,
+            author: obj.author,
+            uploadDate: 0,
+            url: obj.url,
+            duration: obj.duration,
+            viewCount: 0,
+            isLive: false,
+            description: obj.description,
+            video: obj.video,
+            live: []
+        };
+
+        return new PlatformVideoDetails(
+            minimal
+        );
     }
 }
 
+/* -------------------- Search -------------------- */
 
-/* ============================================================
- * SEARCH
- * ========================================================== */
-
-function durationText(s) {
+function parseDurationText(s) {
     s = cleanText(s);
 
     let p = s.split(":");
 
     if (p.length === 2) {
         return (
-            (parseInt(p[0], 10) || 0) * 60 +
-            (parseInt(p[1], 10) || 0)
+            parseInt(
+                p[0],
+                10
+            ) || 0
+        ) * 60 +
+        (
+            parseInt(
+                p[1],
+                10
+            ) || 0
         );
     }
 
     if (p.length === 3) {
         return (
-            (parseInt(p[0], 10) || 0) * 3600 +
-            (parseInt(p[1], 10) || 0) * 60 +
-            (parseInt(p[2], 10) || 0)
+            parseInt(
+                p[0],
+                10
+            ) || 0
+        ) * 3600 +
+        (
+            parseInt(
+                p[1],
+                10
+            ) || 0
+        ) * 60 +
+        (
+            parseInt(
+                p[2],
+                10
+            ) || 0
         );
     }
 
     return 0;
 }
 
-function searchResults(html) {
-    let out = [];
+function extractSearchResults(
+    html
+) {
+    let results = [];
 
     let re =
         /data-movie-id\s*=\s*["']?(\d+)["']?([\s\S]{0,5000}?)(?=data-movie-id|$)/gi;
@@ -1160,79 +2305,125 @@ function searchResults(html) {
 
     while (
         (m = re.exec(html)) !== null &&
-        out.length < MAX_SEARCH
+        results.length < MAX_SEARCH
     ) {
         let id = m[1];
-        let block = m[2] || "";
 
-        let t = "";
-        let p = "";
-        let d = 0;
+        let block =
+            m[2] || "";
 
-        let tm = block.match(
-            /(?:data-title|title)\s*=\s*["']([^"']+)["']/i
-        );
+        let title = "";
+        let poster = "";
+        let duration = 0;
 
-        if (tm)
-            t = cleanText(tm[1]);
-
-        if (!t) {
-            tm = block.match(
-                /<(?:span|div|a)[^>]*class=["'][^"']*(?:title|name)[^"']*["'][^>]*>([\s\S]{1,500}?)<\/(?:span|div|a)>/i
+        let tm =
+            block.match(
+                /(?:data-title|title)\s*=\s*["']([^"']+)["']/i
             );
 
-            if (tm)
-                t = cleanText(tm[1]);
+        if (tm) {
+            title =
+                cleanText(
+                    tm[1]
+                );
         }
 
-        let pm = block.match(
-            /(?:poster|thumbnail|data-poster)\s*=\s*["']([^"']+)["']/i
-        );
+        if (!title) {
+            tm =
+                block.match(
+                    /<(?:span|div|a)[^>]*class=["'][^"']*(?:title|name)[^"']*["'][^>]*>([\s\S]{1,500}?)<\/(?:span|div|a)>/i
+                );
 
-        if (pm)
-            p = normalizeUrl(pm[1]);
+            if (tm) {
+                title =
+                    cleanText(
+                        tm[1]
+                    );
+            }
+        }
 
-        let dm = block.match(
-            /(?:duration|movie-duration)[^>]*>([^<]{1,30})</i
-        );
+        let pm =
+            block.match(
+                /(?:poster|thumbnail|data-poster|data-options)\s*=\s*["']([^"']+)["']/i
+            );
 
-        if (dm)
-            d = durationText(dm[1]);
+        if (pm) {
+            poster =
+                normalizeUrl(
+                    pm[1]
+                );
+        }
 
-        out.push({
+        let dm =
+            block.match(
+                /(?:duration|movie-duration)[^>]*>([^<]{1,30})</i
+            );
+
+        if (dm) {
+            duration =
+                parseDurationText(
+                    dm[1]
+                );
+        }
+
+        results.push({
             id: id,
-            title: t || "OK.ru video " + id,
-            url: "https://ok.ru/video/" + id,
-            thumbnail: p,
-            duration: d
+
+            url:
+                "https://ok.ru/video/" +
+                id,
+
+            title:
+                title ||
+                "OK.ru video " +
+                id,
+
+            thumbnail:
+                poster,
+
+            duration:
+                duration
         });
     }
 
-    return out;
+    return results;
 }
 
-function searchVideo(r) {
+function makeSearchVideo(r) {
+    let thumbs =
+        makeThumbnailList(
+            r.thumbnail
+        );
+
+    let author = null;
+
     try {
         return new PlatformVideo({
-            id: new PlatformID(
-                PLATFORM_NAME,
-                r.id,
-                PLUGIN_ID
-            ),
+            id:
+                new PlatformID(
+                    PLATFORM_NAME,
+                    r.id,
+                    PLUGIN_ID
+                ),
 
-            name: r.title,
+            name:
+                r.title,
 
-            thumbnails: new Thumbnails(
-                thumbnails(r.thumbnail)
-            ),
+            thumbnails:
+                new Thumbnails(
+                    thumbs
+                ),
 
-            author: null,
+            author:
+                author,
 
             uploadDate: 0,
 
-            url: r.url,
+            url:
+                r.url,
 
-            duration: r.duration || 0,
+            duration:
+                r.duration || 0,
 
             viewCount: 0,
 
@@ -1245,24 +2436,45 @@ function searchVideo(r) {
 
 function searchOk(query) {
     let url =
-        SEARCH_URL +
-        encodeURIComponent(str(query));
+        SEARCH_URL_BASE +
+        encodeURIComponent(
+            safeStr(query)
+        );
 
-    let html = GET(url);
+    let html =
+        httpGetAuth(url);
 
-    if (!html)
+    if (!html) {
+        html =
+            httpGet(url);
+    }
+
+    if (!html) {
         throw new Error(
             "OK.ru search returned no data"
         );
+    }
 
-    let raw = searchResults(html);
+    let raw =
+        extractSearchResults(
+            html
+        );
+
     let out = [];
 
-    for (let i = 0; i < raw.length; i++) {
-        let v = searchVideo(raw[i]);
+    for (
+        let i = 0;
+        i < raw.length;
+        i++
+    ) {
+        let v =
+            makeSearchVideo(
+                raw[i]
+            );
 
-        if (v)
+        if (v) {
             out.push(v);
+        }
     }
 
     return new VideoPager(
@@ -1272,165 +2484,205 @@ function searchOk(query) {
     );
 }
 
-function suggestions(query) {
+function searchSuggestions(
+    query
+) {
+    let out = [];
+
     try {
         let url =
-            SEARCH_URL +
-            encodeURIComponent(str(query));
+            SEARCH_URL_BASE +
+            encodeURIComponent(
+                safeStr(query)
+            );
 
-        let html = GET(url);
+        let html =
+            httpGetAuth(url);
 
-        if (!html)
-            return [];
+        if (!html) {
+            html =
+                httpGet(url);
+        }
 
-        let raw = searchResults(html);
-        let out = [];
+        if (!html) {
+            return out;
+        }
+
+        let raw =
+            extractSearchResults(
+                html
+            );
 
         for (
             let i = 0;
-            i < raw.length && out.length < 10;
+            i < raw.length &&
+            out.length < 10;
             i++
         ) {
-            if (raw[i].title)
-                out.push(raw[i].title);
+            if (raw[i].title) {
+                out.push(
+                    raw[i].title
+                );
+            }
         }
-
-        return out;
     } catch (e) {
-        debug("suggestions=" + e);
-        return [];
+        addDebug(
+            "suggestions=" + e
+        );
     }
+
+    return out;
 }
 
+/* -------------------- Details -------------------- */
 
-/* ============================================================
- * VIDEO DETAILS
- * ========================================================== */
+function waitMs(ms) {
+    try {
+        if (
+            typeof Utilities !==
+                "undefined" &&
+            Utilities &&
+            typeof Utilities.sleep ===
+                "function"
+        ) {
+            Utilities.sleep(ms);
+            return true;
+        }
+    } catch (_) {}
 
-function getDetails(url) {
+    return false;
+}
+
+function getVideoDetails(url) {
     resetDebug();
 
-    let id = videoId(url);
+    let id =
+        extractVideoId(url);
 
-    if (!id)
+    if (!id) {
         throw new Error(
             "Invalid OK.ru video URL"
         );
+    }
 
     let canonical =
-        "https://ok.ru/video/" + id;
-
-    debug("Video ID=" + id);
-
-    let html = loadPage(canonical);
-
-    if (!html)
-        throw new Error(
-            "Unable to load OK.ru video page"
-        );
-
-    if (externalProvider(html))
-        debug("External provider detected");
-
-    let meta = metadata(html);
-
-    let pageMedia =
-        collectHtmlMedia(
-            html,
-            canonical
-        );
+        "https://ok.ru/video/" +
+        id;
 
     /*
-     * Incluso si metadata() falla, el escaneo directo
-     * del HTML puede encontrar el HLS/MP4.
+     * Se deja un pequeño margen para paginas donde la informacion del
+     * reproductor aparece despues de la primera respuesta.
      */
-    return buildDetails(
-        meta || {},
-        canonical,
-        id,
-        pageMedia
-    );
-}
 
+    let delays = [
+        0,
+        500,
+        1000,
+        2000,
+        3000
+    ];
 
-/* ============================================================
- * GRAYJAY BINDINGS
- * ========================================================== */
+    let lastMeta = {};
+    let lastHtml = "";
+    let lastMerged = {
+        hls: [],
+        mp4: []
+    };
 
-source.setSettings = function(settings) {
-    // No requiere credenciales ni configuración privada.
-};
+    let external = null;
 
-source.enable = function(config) {
-    return true;
-};
+    for (
+        let attempt = 0;
+        attempt < delays.length;
+        attempt++
+    ) {
+        if (delays[attempt] > 0) {
+            waitMs(
+                delays[attempt]
+            );
+        }
 
-source.disable = function() {};
+        let html =
+            loadOkPage(
+                canonical
+            );
 
-source.getHome = function() {
-    return new VideoPager(
-        [],
-        false,
-        null
-    );
-};
+        if (!html) {
+            addDebug(
+                "attempt " +
+                attempt +
+                ": page unavailable"
+            );
 
-source.getSearchCapabilities = function() {
-    try {
-        return new ResultCapabilities(
-            ["video"],
-            [],
-            []
-        );
-    } catch (_) {
-        return {
-            supportsSearch: true,
-            supportsSuggestions: true
+            continue;
+        }
+
+        lastHtml = html;
+
+        external =
+            findYouTubeEmbed(
+                html
+            );
+
+        if (external) {
+            addDebug(
+                "YouTube embed=" +
+                external.id
+            );
+        }
+
+        let meta =
+            parseMetadata(
+                html,
+                canonical
+            ) || {};
+
+        let pageMedia =
+            collectMediaFromHtml(
+                html,
+                canonical
+            );
+
+        let objectMedia =
+            collectMedia(
+                meta,
+                canonical
+            );
+
+        let merged = {
+            hls: [],
+            mp4: []
         };
-    }
-};
 
-source.search = function(
-    query,
-    type,
-    order,
-    filters
-) {
-    return searchOk(query);
-};
+        for (
+            let i = 0;
+            i < objectMedia.hls.length;
+            i++
+        ) {
+            pushUnique(
+                merged.hls,
+                objectMedia.hls[i],
+                canonical
+            );
+        }
 
-source.searchSuggestions = function(query) {
-    return suggestions(query);
-};
+        for (
+            let i = 0;
+            i < pageMedia.hls.length;
+            i++
+        ) {
+            pushUnique(
+                merged.hls,
+                pageMedia.hls[i],
+                canonical
+            );
+        }
 
-source.isVideoDetailsUrl = function(url) {
-    return VIDEO_RE.test(str(url));
-};
-
-source.isContentDetailsUrl = function(url) {
-    return VIDEO_RE.test(str(url));
-};
-
-source.getVideoDetails = function(url) {
-    return getDetails(url);
-};
-
-source.getContentDetails = function(url) {
-    return getDetails(url);
-};
-
-source.isChannelUrl = function(url) {
-    return false;
-};
-
-source.getChannelCapabilities = function() {
-    try {
-        return new ResultCapabilities(
-            [],
-            [],
-            []
-        );
-    } catch (_) {
-        return null;
-    }
-};
+        for (
+            let i = 0;
+            i < objectMedia.mp4.length;
+            i++
+        ) {
+            pushUnique(
+                merged.mp4,
+                objectMedia
