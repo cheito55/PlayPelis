@@ -1,4 +1,4 @@
-// PlayPelis GrayJay Source v3
+// PlayPelis GrayJay Source v4
 // Multi-servidor + HLS + MP4 + portadas mejoradas + episodios
 var PID = "8a2f4b7e-3c1d-4f6a-9b8e-5d2c1a9f6e40";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -140,7 +140,8 @@ function fixImg(u) {
     }
 
     if (s.indexOf("/") === 0) {
-        return JK + s;
+        if (s.indexOf("animes") !== -1) { return JK + s; }
+        return TMDB_IMG + s;
     }
 
     if (s.indexOf("/") === -1 && s.indexOf(".") !== -1) {
@@ -1019,7 +1020,8 @@ function ppSearch(query) {
 
 function processServers(
     linksData,
-    type
+    type,
+    clickablePrefix
 ) {
     var sources = [];
     var desc = "";
@@ -1064,10 +1066,10 @@ function processServers(
             "]";
 
         desc +=
-            "\n" +
+            "\n→ " +
             serverName +
-            " → " +
-            linkUrl;
+            ": " +
+            (clickablePrefix ? clickablePrefix + "/" + tried : linkUrl);
 
         addDebug(
             "[" +
@@ -1175,7 +1177,8 @@ function ppMovieDetails(id) {
     var result =
         processServers(
             linksData,
-            "movie"
+            "movie",
+            "pp://server/movie/" + id
         );
 
     desc +=
@@ -1345,7 +1348,8 @@ function ppEpisodeLinks(
     var result =
         processServers(
             linksData,
-            "episode"
+            "episode",
+            "pp://server/serie/" + id + "/" + season + "/" + episode
         );
 
     var desc =
@@ -1407,6 +1411,162 @@ function ppEpisodeLinks(
 // =========================================================
 // JKANIME
 // =========================================================
+
+// =========================================================
+// SERVIDOR ESPECÍFICO - PELÍCULA
+// =========================================================
+
+function ppMovieServerDetails(id, serverIndex) {
+    _debugLog = "";
+
+    var data =
+        ppGet("/movies/" + id);
+
+    if (!data) {
+        return mkDetail(
+            "pp_m_" + id,
+            "Sin resultado",
+            "",
+            "pp://server/movie/" + id + "/" + serverIndex,
+            [],
+            ""
+        );
+    }
+
+    var title =
+        data.b || "";
+
+    var thumb =
+        fixImg(data.d) ||
+        fixImg(data.c) ||
+        "";
+
+    var desc =
+        data.e || "";
+
+    var linksData =
+        ppGet(
+            "/movies/" +
+            id +
+            "/links"
+        );
+
+    var srvSrc = null;
+    var srvName = "";
+
+    if (linksData && serverIndex >= 0 && serverIndex < linksData.length) {
+        var link = linksData[serverIndex];
+        srvName = (link.b || "Srv") + " [" + (link.c || "") + "]";
+        var linkUrl = link.a || "";
+        var extracted = extractVideo(linkUrl);
+        if (extracted && isPlayableUrl(extracted)) {
+            srvSrc = mkSource(extracted, srvName);
+        }
+    }
+
+    desc += "\n\n▶ Reproduciendo: " + (srvName || "Servidor " + serverIndex);
+
+    if (linksData) {
+        desc += "\n\n--- Servidores ---";
+        for (var i = 0; i < linksData.length; i++) {
+            var sl = linksData[i];
+            var sn = (sl.b || "Srv") + " [" + (sl.c || "") + "]";
+            var marker = (i === serverIndex) ? " ★" : "";
+            desc += "\n→ " + sn + marker + ": pp://server/movie/" + id + "/" + i;
+        }
+    }
+
+    return mkDetail(
+        "pp_m_" + id,
+        title,
+        thumb,
+        "pp://server/movie/" + id + "/" + serverIndex,
+        srvSrc ? [srvSrc] : [],
+        desc
+    );
+}
+
+// =========================================================
+// SERVIDOR ESPECÍFICO - EPISODIO
+// =========================================================
+
+function ppEpisodeServerDetails(id, season, episode, serverIndex) {
+    _debugLog = "";
+
+    var data =
+        ppGet("/series/" + id);
+
+    if (!data) {
+        return mkDetail(
+            "pp_se_" + id,
+            "Sin resultado",
+            "",
+            "",
+            [],
+            ""
+        );
+    }
+
+    var title =
+        (data.b || "") +
+        " S" + season +
+        "E" + episode;
+
+    var thumb =
+        fixImg(data.d) ||
+        fixImg(data.c) ||
+        "";
+
+    var linksData =
+        ppGet(
+            "/series/" +
+            id +
+            "/links/" +
+            season +
+            "/" +
+            episode
+        );
+
+    var srvSrc = null;
+    var srvName = "";
+
+    if (linksData && serverIndex >= 0 && serverIndex < linksData.length) {
+        var link = linksData[serverIndex];
+        srvName = (link.b || "Srv") + " [" + (link.c || "") + "]";
+        var linkUrl = link.a || "";
+        var extracted = extractVideo(linkUrl);
+        if (extracted && isPlayableUrl(extracted)) {
+            srvSrc = mkSource(extracted, srvName);
+        }
+    }
+
+    var desc = "";
+    desc += "\n\n▶ Reproduciendo: " + (srvName || "Servidor " + serverIndex);
+
+    if (linksData) {
+        desc += "\n\n--- Servidores ---";
+        for (var i = 0; i < linksData.length; i++) {
+            var sl = linksData[i];
+            var sn = (sl.b || "Srv") + " [" + (sl.c || "") + "]";
+            var marker = (i === serverIndex) ? " ★" : "";
+            desc += "\n→ " + sn + marker + ": pp://server/serie/" + id + "/" + season + "/" + episode + "/" + i;
+        }
+    }
+
+    var epNum = parseInt(episode, 10);
+    desc += "\n\n--- Navegación ---";
+    if (epNum > 1) desc += "\n◀ Ep anterior → pp://serie/" + id + "/" + season + "/" + (epNum - 1);
+    desc += "\n▶ Ep siguiente → pp://serie/" + id + "/" + season + "/" + (epNum + 1);
+
+    return mkDetail(
+        "pp_se_" + id + "_" + season + "_" + episode,
+        title,
+        thumb,
+        "pp://server/serie/" + id + "/" + season + "/" + episode + "/" + serverIndex,
+        srvSrc ? [srvSrc] : [],
+        title + desc
+    );
+}
 
 function jkaSearch(query) {
     var out = [];
@@ -1819,6 +1979,46 @@ function doDetails(url) {
         ) !== -1
     ) {
         return jkaDetails(url);
+    }
+
+    // Servidor específico de película: pp://server/movie/ID/INDEX
+    if (
+        url.indexOf(
+            "pp://server/movie/"
+        ) === 0
+    ) {
+        var sm =
+            url.match(
+                /pp:\/\/server\/movie\/(\d+)\/(\d+)/
+            );
+
+        if (sm) {
+            return ppMovieServerDetails(
+                sm[1],
+                parseInt(sm[2], 10)
+            );
+        }
+    }
+
+    // Servidor específico de serie: pp://server/serie/ID/S/E/INDEX
+    if (
+        url.indexOf(
+            "pp://server/serie/"
+        ) === 0
+    ) {
+        var ss =
+            url.match(
+                /pp:\/\/server\/serie\/(\d+)\/(\d+)\/(\d+)\/(\d+)/
+            );
+
+        if (ss) {
+            return ppEpisodeServerDetails(
+                ss[1],
+                ss[2],
+                ss[3],
+                parseInt(ss[4], 10)
+            );
+        }
     }
 
     if (
